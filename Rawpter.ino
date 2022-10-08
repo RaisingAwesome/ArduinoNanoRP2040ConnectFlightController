@@ -127,7 +127,7 @@ int batteryVoltage=1023;
 void setup() {
   //Bootup operations 
   setupSerial();
-  if (ALLOW_WIFI) setupWiFi(); //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
+  if (ALLOW_WIFI) setupWiFi(); //Future feature: At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
   buzzer_millis=millis();
   
   pinMode(9,OUTPUT);
@@ -192,7 +192,7 @@ void setupSerial(){
 }
 
 void setupWiFi()
-{
+{ //For future functionality of being able to connect to the drone with your mobile phone browser.
   char ssid[] = "Rawpter";        
   char pass[] = "12345678";    
 
