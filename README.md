@@ -9,7 +9,7 @@ We have designed a printed circuit board (PCB) that goes along with this code.  
 
 What's special about this project is that at the time of writing this article, there are no search results via Google, Bing, or Yahoo that can find a published opensource code for the Arduino Nano RP2040 Connect for flight control. This makes this project the first published open-source version!
 ## Attribution
-We got our starter code from nickrehm's repository dRehmFlight.  It was great code IMU focused code for the Teensy that we ported for our hardware and additional features such as proximity sensors and GPS.  You can find his repository here: [dRehmFlight](https://github.com/nickrehm/dRehmFlight)
+We got our starter code from nickrehm's repository dRehmFlight.  It is great IMU focused code for the Teensy that we ported for our hardware and to pursue additional features such as proximity sensors and GPS.  You can find his repository here: [dRehmFlight](https://github.com/nickrehm/dRehmFlight)
 ## Hardware
 These are the components we are using for our drone:
 
