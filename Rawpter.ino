@@ -181,7 +181,7 @@ void Troubleshooting() {
     //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
     //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
     //printAccelData();     //Prints filtered accelerometer data direct from IMU (expected: ~ -2 to 2; x,y 0 when level, z 1 when level)
-    printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
+    //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
     //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
     //printLoopRate();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
@@ -363,12 +363,12 @@ void setupDrone() {
   m2_command_PWM = 0;
   m3_command_PWM = 0;
   m4_command_PWM = 0;
-/*
+
   while (getRadioPWM(1)>1100&getRadioPWM(1)<800) //wait until the throttle is turned down before allowing anything else to happen.
   {
     delay(1000);
   }
-*/
+
   if (DEBUG) Serial.println("blinking");
   //Indicate entering main loop with 3 quick blinks
   setupBlink(3,160,70); //numBlinks, upTime (ms), downTime (ms)
@@ -407,7 +407,7 @@ void loopDrone() {
   scaleCommands(); //Scales motor commands to 0-1
 
   //Throttle cut check
-  channel_1_pwm=2000; //for bench testing without a radio connected.  Comment out when ready to run.
+  //channel_1_pwm=2000; //for bench testing without a radio connected.  Comment out when ready to run.
   throttleCut(); //Directly sets motor commands to low based on channel 1 stick being in the down position.
   if (DEBUG) Serial.println("commandMotors");
   
