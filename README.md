@@ -13,6 +13,7 @@ We got our starter code from nickrehm's repository dRehmFlight.  It was great co
 ## Hardware
 These are the components we are using for our drone:
 
+- Microcontroller:  Arduino Nano RP2040 Connect
 - Motors: QWinOut A2212 1000KV Brushless Outrunner Motor 13T
 - ESCs: QWinOut 2-4S 30A/40A RC Brushless ESC Simonk Firmware Electric Speed Controller with 5V 3A BEC
 - Battery: HRB 4S 3300mAh 14.8v Lipo RC Battery 60C
