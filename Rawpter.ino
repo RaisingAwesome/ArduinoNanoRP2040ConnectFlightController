@@ -2,7 +2,11 @@
 #include <WiFiNINA.h> //WiFi
 #include <Arduino_LSM6DSOX.h> //IMU
 #include <Servo.h>
-
+//Note:  Motors are referenced in clockwise orientation
+//1) Front left (from a tiny little pilots eye view)
+//2) Front right
+//3) Back right
+//4) Back left
 //========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
 //========================================================================================================================//
@@ -127,7 +131,7 @@ int batteryVoltage=1023;
 void setup() {
   //Bootup operations 
   setupSerial();
-  if (ALLOW_WIFI) setupWiFi(); //Future feature: At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
+  if (ALLOW_WIFI) setupWiFi(); //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
   buzzer_millis=millis();
   
   pinMode(9,OUTPUT);
@@ -177,22 +181,22 @@ void Troubleshooting() {
     //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
     //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
     //printAccelData();     //Prints filtered accelerometer data direct from IMU (expected: ~ -2 to 2; x,y 0 when level, z 1 when level)
-    //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
+    printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
-    printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
+    //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
     //printLoopRate();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
   }
 
 
 void setupSerial(){
-  Serial.begin(9600);
+  Serial.begin(57600);
   
   delay(1000);
   if (DEBUG) Serial.println("I got mine!");
 }
 
 void setupWiFi()
-{ //For future functionality of being able to connect to the drone with your mobile phone browser.
+{
   char ssid[] = "Rawpter";        
   char pass[] = "12345678";    
 
@@ -334,8 +338,6 @@ void setupDrone() {
 
   //Initialize radio communication
   radioSetup();
-  
-
   channel_1_pwm = channel_1_fs;
   channel_2_pwm = channel_2_fs;
   channel_3_pwm = channel_3_fs;
@@ -354,14 +356,19 @@ void setupDrone() {
   delay(5);
   if (DEBUG) Serial.println("Initializing");
 
-  calibrateESCs(); //calibrate before going into the loop
+  if (getRadioPWM(1)>1500) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
   //Code will not proceed past here if this function is uncommented!
 
   m1_command_PWM = 0; //Default for motor stopped for Simonk firmware
   m2_command_PWM = 0;
   m3_command_PWM = 0;
   m4_command_PWM = 0;
-
+/*
+  while (getRadioPWM(1)>1100&getRadioPWM(1)<800) //wait until the throttle is turned down before allowing anything else to happen.
+  {
+    delay(1000);
+  }
+*/
   if (DEBUG) Serial.println("blinking");
   //Indicate entering main loop with 3 quick blinks
   setupBlink(3,160,70); //numBlinks, upTime (ms), downTime (ms)
@@ -379,7 +386,7 @@ void loopDrone() {
   dt1 = (current_time - prev_time)/1000000.0;
 
   loopBlink(); //Indicate we are in main loop with short blink every 1.5 seconds
-  Troubleshooting();
+
   
   //Get vehicle state
   getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
@@ -400,9 +407,12 @@ void loopDrone() {
   scaleCommands(); //Scales motor commands to 0-1
 
   //Throttle cut check
-  throttleCut(); //Directly sets motor commands to low based on state of ch5
+  channel_1_pwm=2000; //for bench testing without a radio connected.  Comment out when ready to run.
+  throttleCut(); //Directly sets motor commands to low based on channel 1 stick being in the down position.
   if (DEBUG) Serial.println("commandMotors");
- 
+  
+  Troubleshooting();
+
   //Command actuators
   commandMotors(); //Sends command pulses to each motor pin
   if (DEBUG) Serial.println("getCommands");
@@ -410,8 +420,9 @@ void loopDrone() {
   //Get vehicle commands for next loop iteration
   getCommands(); //Pulls current available radio commands
   if (DEBUG) Serial.println("failSafe()");
-  //failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
-  if (DEBUG) Serial.println("loopRate");
+  deadBand(); //allows for a bit of deadband on the thumbstick;
+  failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
+  if (DEBUG) Serial.println("Passed failsafe and heading to loopRate");
   //Regulate loop rate
   loopRate(2000); //Do not exceed 2000Hz, all filter parameters tuned to 2000Hz by default
 }
@@ -911,6 +922,12 @@ void getCommands() {
     channel_2_pwm = getRadioPWM(2);
     channel_3_pwm = getRadioPWM(3);
     channel_4_pwm = getRadioPWM(4);
+    //channel_1_pwm = 1000;
+    //channel_2_pwm = 1500;
+    //channel_3_pwm = 1500;
+    //channel_4_pwm = 1500;
+
+
     //channel_5_pwm = getRadioPWM(5);
     //channel_6_pwm = getRadioPWM(6);
 
@@ -925,6 +942,13 @@ void getCommands() {
   channel_2_pwm_prev = channel_2_pwm;
   channel_3_pwm_prev = channel_3_pwm;
   channel_4_pwm_prev = channel_4_pwm;
+}
+
+void deadBand() {
+  if (abs(channel_1_pwm-1000)<100 ) channel_1_pwm=1000;
+  if (abs(channel_2_pwm-1500)<50) channel_2_pwm=1500;
+  if (abs(channel_3_pwm-1500)<50) channel_3_pwm=1500;
+  if (abs(channel_4_pwm-1500)<50) channel_4_pwm=1500;
 }
 
 void failSafe() {
@@ -972,49 +996,6 @@ void commandMotors() {
   m2PWM.write(m2_command_PWM);
   m3PWM.write(m3_command_PWM);
   m4PWM.write(m4_command_PWM);
-/*
-  int wentLow = 0;
-  int pulseStart, timer;
-  int flagM1 = 0;
-  int flagM2 = 0;
-  int flagM3 = 0;
-  int flagM4 = 0;
-  
-  //Write all motor pins high
-  digitalWrite(m1Pin, HIGH);
-  digitalWrite(m2Pin, HIGH);
-  digitalWrite(m3Pin, HIGH);
-  digitalWrite(m4Pin, HIGH);
-  pulseStart = micros();
-  //Write each motor pin low as correct pulse length is reached
-  if (DEBUG) Serial.println("while wentLow");
-  while (wentLow < 4 ) { //Keep going until final (4th motor) pulse is finished, then done
-    timer = micros();
-    if ((m1_command_PWM <= timer - pulseStart) && (flagM1==0)) {
-      digitalWrite(m1Pin, LOW);
-      wentLow++;
-      flagM1 = 1;
-    }
-    if ((m2_command_PWM <= timer - pulseStart) && (flagM2==0)) {
-      digitalWrite(m2Pin, LOW);
-      wentLow++;
-      flagM2 = 1;
-    }
-    if ((m3_command_PWM <= timer - pulseStart) && (flagM3==0)) {
-      digitalWrite(m3Pin, LOW);
-      wentLow++;
-      flagM3 = 1;
-    }
-    if ((m4_command_PWM <= timer - pulseStart) && (flagM4==0)) {
-      digitalWrite(m4Pin, LOW);
-      wentLow++;
-      flagM4 = 1;
-    }     
-  }
-*/
-
-
-
   if (DEBUG) Serial.println("made it to bottom of commandmotors");  
 }
 
@@ -1029,12 +1010,12 @@ void calibrateESCs() {
   m2PWM.write(180);
   m3PWM.write(180);
   m4PWM.write(180);
-  delay(6000);
+  delay(5000);
   m1PWM.write(0);
   m2PWM.write(0);
   m3PWM.write(0);
   m4PWM.write(0);
-  delay(6000);
+  delay(5000);
 }
 
 float floatFaderLinear(float param, float param_min, float param_max, float fadeTime, int state, int loopFreq){
@@ -1105,13 +1086,12 @@ void switchRollYaw(int reverseRoll, int reverseYaw) {
 void throttleCut() {
   //DESCRIPTION: Directly set actuator outputs to minimum value if triggered
   /*
-   * Monitors the state of radio command channel_5_pwm and directly sets the mx_command_PWM values to minimum (1060 is
+   * Monitors the state of radio command channel_1_pwm and directly sets the mx_command_PWM values to minimum (1060 is
    * minimum , 0 is minimum for standard PWM servo library used) if channel 5 is high. This is the last function 
    * called before commandMotors() is called so that the last thing checked is if the user is giving permission to command
    * the motors to anything other than minimum value. Safety first. 
    */
-  return;
-  if (channel_4_pwm < 1100) {
+  if (channel_1_pwm < 1100) {
     m1_command_PWM = 0;
     m2_command_PWM = 0;
     m3_command_PWM = 0;
