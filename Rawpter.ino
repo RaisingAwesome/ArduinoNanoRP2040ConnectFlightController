@@ -1,3 +1,8 @@
+//Rawpter 1.0 by Sean J. Miller
+//Flight Controller code for an Arduino Nano RP2040 Connect
+//Go to https://raisingawesome.set/projects for more info
+//MIT License - use for any purpose you want
+
 #include <SPI.h>
 #include <WiFiNINA.h> //WiFi
 #include <Arduino_LSM6DSOX.h> //IMU
