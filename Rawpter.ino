@@ -2,24 +2,21 @@
 #include <WiFiNINA.h> //WiFi
 #include <Arduino_LSM6DSOX.h> //IMU
 #include <Servo.h>
-//Note:  Motors are referenced in clockwise orientation
-//1) Front left (from a tiny little pilots eye view)
-//2) Front right
-//3) Back right
-//4) Back left
+
 //========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
 //========================================================================================================================//
 #define DEBUG false
 
-bool beeping=false;
-//Radio failsafe values for every channel in the event that bad reciever data is detected. Recommended defaults:
-unsigned long channel_1_fs = 1000; //throt  will allow it to descend to the ground
-unsigned long channel_2_fs = 1500; //ail pretty much in the middle so it quits turning
-unsigned long channel_3_fs = 1500; //elev
-unsigned long channel_4_fs = 1500; //rudd
-unsigned long channel_5_fs = 2000; //gear, greater than 1500 = throttle cut
-unsigned long channel_6_fs = 2000; //aux1
+float batteryType=14.8; //code handles 14.8 or 7.4V LIPOs.  Used for detecting and alerting a low battery. If not hooked up, it will pull down and beep often.
+//Radio failsafe values for every channel in the event that bad reciever data is detected.
+//These are for it to stay stable and descend safely versus cut throttle and drop like a rock.
+unsigned long PWM_throttle_zero = 1000; //used when we want to take throttle to zero.  Failsafe is something higher as it is expected that failsafe is a value needed to safely land.
+unsigned long PWM_throttle_fs = 1200; //throttle  will allow it to descend to the ground
+unsigned long PWM_roll_fs = 1500; //ail pretty much in the middle so it quits turning
+unsigned long PWM_elevation_fs = 1500; //elev
+unsigned long PWM_rudd_fs = 1500; //rudd
+unsigned long PWM_ThrottleCutSwitch_fs = 2000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
 
 //Filter parameters - Defaults tuned for 2kHz loop rate; Do not touch unless you know what you are doing:
 float B_madgwick = 0.04;  //Madgwick filter parameter
@@ -37,14 +34,14 @@ float GyroErrorZ = 0.04;
 
 //Controller parameters (take note of defaults before modifying!): 
 float i_limit = 25.0;     //Integrator saturation level, mostly for safety (default 25.0)
-float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode 
-float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode
-float maxYaw = 160.0;     //Max yaw rate in deg/sec
+float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxYaw = 160.0;     //Max yaw rate in deg/sec (default 160.0)
 
 float Kp_roll_angle = 0.2;    //Roll P-gain - angle mode 
 float Ki_roll_angle = 0.3;    //Roll I-gain - angle mode
 float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode (has no effect on controlANGLE2)
-float B_loop_roll = 0.9;      //Roll damping term for controlANGLE2(), lower is more damping (must be between 0 to 1)
+float B_loop_roll = 0.9;      //Roll damping term for controlANGLE2(), lower is more damping (must be between 0 to 1, originally was 0.9)
 float Kp_pitch_angle = 0.2;   //Pitch P-gain - angle mode
 float Ki_pitch_angle = 0.3;   //Pitch I-gain - angle mode
 float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode (has no effect on controlANGLE2)
@@ -64,24 +61,30 @@ float Kd_yaw = 0.00015;       //Yaw D-gain (be careful when increasing too high,
 //========================================================================================================================//
 //                                                     DECLARE PINS                                                       //                           
 //========================================================================================================================//                                          
-
-//NOTE: Pin LEDG is reserved for onboard Green LED
 //Radio:
-const int ch1Pin = 2; //throttle - up and down on the 
-const int ch2Pin = 3; //ail
-const int ch3Pin = 4; //ele
-const int ch4Pin = 5; //rudd
-const int ch5Pin = 6; //gear (throttle cut)
-const int ch6Pin = 7; //aux1 (free aux channel)
+//used so I quit getting confused begween the ARduino pins and the Radio Channel pins.
+const int stickRightHorizontal=2; //right horizontal stick
+const int stickRightVertical=3; //right vertical stick
+const int stickLeftVertical=4; //left vertical stick
+const int stickLeftHorizontal=5; //left horizontal stick
+const int SwitchA=6; //SWA switch
+
+const int throttlePin = stickLeftVertical; //throttle - up and down on the 
+const int rollPin = stickRightHorizontal; //ail (roll)
+const int upDownPin = stickRightVertical; //ele
+const int ruddPin = stickLeftHorizontal; //rudd
+const int throttleCutSwitchPin = SwitchA; //gear (throttle cut)
 
 //Motor Electronic Speed Control Modules (ESC):
 const int m1Pin = 14;
 const int m2Pin = 15;
 const int m3Pin = 16;
-const int m4Pin = 8; // (17 should have worked, but doesn't)
+const int m4Pin = 10; // (17 should have worked, but doesn't)
 Servo m1PWM, m2PWM, m3PWM, m4PWM;
+
 //========================================================================================================================//
 //DECLARE GLOBAL VARIABLES
+//========================================================================================================================//
 
 //General stuff
 float dt1;
@@ -89,10 +92,12 @@ unsigned long current_time, prev_time;
 unsigned long print_counter, serial_counter;
 unsigned long blink_counter, blink_delay;
 bool blinkAlternate;
+bool beeping=false; //for beeping when the battery is getting low.
+bool throttle_is_cut=true; //used to force the pilot to manually set the throttle to zero after the switch is used to throttle cut
 
 //Radio communication:
-unsigned long channel_1_pwm, channel_2_pwm, channel_3_pwm, channel_4_pwm, channel_5_pwm, channel_6_pwm;
-unsigned long channel_1_pwm_prev, channel_2_pwm_prev, channel_3_pwm_prev, channel_4_pwm_prev;
+unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwitch, channel_6_pwm;
+unsigned long PWM_throttle_prev,PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
 
 //IMU:
 float AccX, AccY, AccZ;
@@ -128,26 +133,40 @@ bool ALLOW_WIFI=false;
 WiFiServer server(80);
 int batteryVoltage=1023;
 //WiFi End
+
+
+//========================================================================================================================//
+//BEGIN THE CLASSIC SETUP AND LOOP
+//========================================================================================================================//
+
 void setup() {
   //Bootup operations 
   setupSerial();
+  setupBatteryMonitor();
   if (ALLOW_WIFI) setupWiFi(); //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
-  buzzer_millis=millis();
-  
-  pinMode(9,OUTPUT);
-  pinMode(A6,INPUT);
   setupDrone();
 }
 
 void loop() {
+  tick(); //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
+
   //The main thread that infinitely loops - poleing sensors and taking action.
   if (ALLOW_WIFI) loopWiFi();
   loopBuzzer();
   loopDrone();
+
+  tock(2000); //Do not exceed 2000Hz, all filter parameters tuned to 2000Hz by default
+}
+
+void setupBatteryMonitor()
+{
+  buzzer_millis=millis();  
+  pinMode(9,OUTPUT);
+  pinMode(A6,INPUT);
 }
 
 void loopBuzzer()
-{
+{ //this monitors the battery.  the lower it gets, the faster it beeps.
   if (!beeping){    
     if ( millis()-buzzer_millis>(buzzer_spacing) )
     {
@@ -166,13 +185,25 @@ void loopBuzzer()
       if (DEBUG) Serial.println("About to go lower");
     }
   }
+
   batteryVoltage=analogRead(A6);
-  if (batteryVoltage>800) buzzer_spacing=10000;
-  else if (batteryVoltage>600) buzzer_spacing=8000;
-  else if (batteryVoltage>400) buzzer_spacing=4000;
-  else if (batteryVoltage>200) buzzer_spacing=1000;
-  else if (batteryVoltage>100) buzzer_spacing=500;
-  else if (batteryVoltage>0) buzzer_spacing=200;
+  if (batteryType==14.8)
+  {
+    if (batteryVoltage>604) buzzer_spacing=40000;
+    else if (batteryVoltage>580) buzzer_spacing=30000;
+    else if (batteryVoltage>556) buzzer_spacing=20000;
+    else if (batteryVoltage>534) buzzer_spacing=10000;
+    else if (batteryVoltage>510) buzzer_spacing=500;
+    else buzzer_spacing=100;
+  } else
+  {
+    if (batteryVoltage>302) buzzer_spacing=40000;
+    else if (batteryVoltage>290) buzzer_spacing=30000;
+    else if (batteryVoltage>278) buzzer_spacing=20000;
+    else if (batteryVoltage>267) buzzer_spacing=10000;
+    else if (batteryVoltage>255) buzzer_spacing=500;
+    else buzzer_spacing=100;
+  }
 }
 
 void Troubleshooting() {
@@ -184,7 +215,7 @@ void Troubleshooting() {
     //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
     //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
-    //printLoopRate();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
+    //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
   }
 
 
@@ -329,22 +360,21 @@ void setupDrone() {
   pinMode(m2Pin, OUTPUT);
   pinMode(m3Pin, OUTPUT);
   pinMode(m4Pin, OUTPUT);
-  m1PWM.attach(m1Pin,1400,2000);
-  m2PWM.attach(m2Pin,1400,2000);
-  m3PWM.attach(m3Pin,1400,2000);
-  m4PWM.attach(m4Pin,1400,2000);
+  m1PWM.attach(m1Pin,1060,1860);
+  m2PWM.attach(m2Pin,1060,1860);
+  m3PWM.attach(m3Pin,1060,1860);
+  m4PWM.attach(m4Pin,1060,1860);
   //Set built in LED to turn on to signal startup
   delay(5);
 
   //Initialize radio communication
   radioSetup();
-  channel_1_pwm = channel_1_fs;
-  channel_2_pwm = channel_2_fs;
-  channel_3_pwm = channel_3_fs;
-  channel_4_pwm = channel_4_fs;
-  channel_5_pwm = channel_5_fs;
-  channel_6_pwm = channel_6_fs;
-
+  PWM_throttle = PWM_throttle_zero;
+  PWM_roll = PWM_roll_fs;
+  PWM_Elevation = PWM_elevation_fs;
+  PWM_Rudd = PWM_rudd_fs;
+  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs;
+  
   //Initialize IMU communication
   IMUinit();
 
@@ -356,15 +386,14 @@ void setupDrone() {
   delay(5);
   if (DEBUG) Serial.println("Initializing");
 
-  if (getRadioPWM(1)>1500) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
-  //Code will not proceed past here if this function is uncommented!
-
+  if (getRadioPWM(1)>1800) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
+  
   m1_command_PWM = 0; //Default for motor stopped for Simonk firmware
   m2_command_PWM = 0;
   m3_command_PWM = 0;
   m4_command_PWM = 0;
 
-  while (getRadioPWM(1)>1100&getRadioPWM(1)<800) //wait until the throttle is turned down before allowing anything else to happen.
+  while (getRadioPWM(1)>1060&getRadioPWM(1)<800) //wait until the throttle is turned down before allowing anything else to happen.
   {
     delay(1000);
   }
@@ -379,54 +408,29 @@ void setupDrone() {
 //========================================================================================================================//
 
 void loopDrone() {
-  if (DEBUG) Serial.println("Entered loopDrone");
+  loopBlink(); //Indicates that we are in main loop with short blink every 1.5 seconds
+  getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
+  Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ, dt1); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
+  getDesiredAnglesAndThrottle(); //Convert raw commands to normalized values based on saturated control limits
+  controlANGLE(); //Stabilize on angle setpoint from getDesiredAnglesAndThrottle
+  controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
+  scaleCommands(); //Scales motor commands to 0-1
+  throttleCut(); //Directly sets motor commands to off based on channel 5 being switched
+  //Troubleshooting(); //will do the print routines if uncommented
+  commandMotors(); //Sends command pulses to each motor pin
+  getRadioSticks(); //Gets the PWM from the receiver
+  failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
+  deadBand(); //allows for a bit of deadband on the throttle;
+
+}
+
+void tick()
+{
   //Keep track of what time it is and how much time has elapsed since the last loop
   prev_time = current_time;      
   current_time = micros();      
   dt1 = (current_time - prev_time)/1000000.0;
-
-  loopBlink(); //Indicate we are in main loop with short blink every 1.5 seconds
-
-  
-  //Get vehicle state
-  getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
-  Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ, dt1); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
-
-  if (DEBUG) Serial.println("getDesState");
-  //Compute desired state
-  getDesState(); //Convert raw commands to normalized values based on saturated control limits
-  
-  //PID Controller - SELECT ONE:
-  controlANGLE(); //Stabilize on angle setpoint
-  //controlANGLE2(); //Stabilize on angle setpoint using cascaded method. Rate controller must be tuned well first!
-  //controlRATE(); //Stabilize on rate setpoint
-  
-  if (DEBUG) Serial.println("controlMixer");
-  //Actuator mixing and scaling to PWM values
-  controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
-  scaleCommands(); //Scales motor commands to 0-1
-
-  //Throttle cut check
-  //channel_1_pwm=2000; //for bench testing without a radio connected.  Comment out when ready to run.
-  throttleCut(); //Directly sets motor commands to low based on channel 1 stick being in the down position.
-  if (DEBUG) Serial.println("commandMotors");
-  
-  Troubleshooting();
-
-  //Command actuators
-  commandMotors(); //Sends command pulses to each motor pin
-  if (DEBUG) Serial.println("getCommands");
-
-  //Get vehicle commands for next loop iteration
-  getCommands(); //Pulls current available radio commands
-  if (DEBUG) Serial.println("failSafe()");
-  deadBand(); //allows for a bit of deadband on the thumbstick;
-  failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
-  if (DEBUG) Serial.println("Passed failsafe and heading to loopRate");
-  //Regulate loop rate
-  loopRate(2000); //Do not exceed 2000Hz, all filter parameters tuned to 2000Hz by default
 }
-
 //========================================================================================================================//
 //                                                      FUNCTIONS                                                         //                           
 //========================================================================================================================//
@@ -595,7 +599,7 @@ void calibrateAttitude() {
     dt1 = (current_time - prev_time)/1000000.0; 
     getIMUdata();
     Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ, dt1);
-    loopRate(2000); //do not exceed 2000Hz
+    tock(2000); //do not exceed 2000Hz
   }
 }
 
@@ -681,7 +685,7 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az, fl
   yaw_IMU = -atan2(q1*q2 + q0*q3, 0.5f - q2*q2 - q3*q3)*57.29577951; //degrees
 }
 
-void getDesState() {
+void getDesiredAnglesAndThrottle() {
   //DESCRIPTION: Normalizes desired control values to appropriate values
   /*
    * Updates the desired state variables thro_des, roll_des, pitch_des, and yaw_des. These are computed by using the raw
@@ -690,10 +694,10 @@ void getDesState() {
    * (rate mode). yaw_des is scaled to be within max yaw in degrees/sec. Also creates roll_passthru, pitch_passthru, and
    * yaw_passthru variables, to be used in commanding motors/servos with direct unstabilized commands in controlMixer().
    */
-  thro_des = (channel_1_pwm - 1000.0)/1000.0; //Between 0 and 1
-  roll_des = (channel_2_pwm - 1500.0)/500.0; //Between -1 and 1
-  pitch_des = (channel_3_pwm - 1500.0)/500.0; //Between -1 and 1
-  yaw_des = (channel_4_pwm - 1500.0)/500.0; //Between -1 and 1
+  thro_des = (PWM_throttle - 1000.0)/1000.0; //Between 0 and 1
+  roll_des = (PWM_roll - 1500.0)/500.0; //Between -1 and 1
+  pitch_des = (PWM_Elevation - 1500.0)/500.0; //Between -1 and 1
+  yaw_des = (PWM_Rudd - 1500.0)/500.0; //Between -1 and 1
   roll_passthru = roll_des/2.0; //Between -0.5 and 0.5
   pitch_passthru = pitch_des/2.0; //Between -0.5 and 0.5
   yaw_passthru = yaw_des/2.0; //Between -0.5 and 0.5
@@ -712,7 +716,7 @@ void controlANGLE() {
   //DESCRIPTION: Computes control commands based on state error (angle)
   /*
    * Basic PID control to stablize on angle setpoint based on desired states roll_des, pitch_des, and yaw_des computed in 
-   * getDesState(). Error is simply the desired state minus the actual state (ex. roll_des - roll_IMU). Two safety features
+   * getDesiredAnglesAndThrottle(). Error is simply the desired state minus the actual state (ex. roll_des - roll_IMU). Two safety features
    * are implimented here regarding the I terms. The I terms are saturated within specified limits on startup to prevent 
    * excessive buildup. This can be seen by holding the vehicle at an angle and seeing the motors ramp up on one side until
    * they've maxed out throttle...saturating I to a specified limit fixes this. The second feature defaults the I terms to 0
@@ -724,7 +728,7 @@ void controlANGLE() {
   //Roll
   error_roll = roll_des - roll_IMU;
   integral_roll = integral_roll_prev + error_roll*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
   integral_roll = constrain(integral_roll, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -734,7 +738,7 @@ void controlANGLE() {
   //Pitch
   error_pitch = pitch_des - pitch_IMU;
   integral_pitch = integral_pitch_prev + error_pitch*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_pitch = 0;
   }
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -744,7 +748,7 @@ void controlANGLE() {
   //Yaw, stablize on rate from GyroZ
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -771,7 +775,7 @@ void controlANGLE2() {
   //Roll
   error_roll = roll_des - roll_IMU;
   integral_roll_ol = integral_roll_prev_ol + error_roll*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll_ol = 0;
   }
   integral_roll_ol = constrain(integral_roll_ol, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -781,7 +785,7 @@ void controlANGLE2() {
   //Pitch
   error_pitch = pitch_des - pitch_IMU;
   integral_pitch_ol = integral_pitch_prev_ol + error_pitch*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_pitch_ol = 0;
   }
   integral_pitch_ol = constrain(integral_pitch_ol, -i_limit, i_limit); //saturate integrator to prevent unsafe buildup
@@ -801,7 +805,7 @@ void controlANGLE2() {
   //Roll
   error_roll = roll_des_ol - GyroX;
   integral_roll_il = integral_roll_prev_il + error_roll*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll_il = 0;
   }
   integral_roll_il = constrain(integral_roll_il, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -811,7 +815,7 @@ void controlANGLE2() {
   //Pitch
   error_pitch = pitch_des_ol - GyroY;
   integral_pitch_il = integral_pitch_prev_il + error_pitch*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_pitch_il = 0;
   }
   integral_pitch_il = constrain(integral_pitch_il, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -821,7 +825,7 @@ void controlANGLE2() {
   //Yaw
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -853,7 +857,7 @@ void controlRATE() {
   //Roll
   error_roll = roll_des - GyroX;
   integral_roll = integral_roll_prev + error_roll*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
   integral_roll = constrain(integral_roll, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -863,7 +867,7 @@ void controlRATE() {
   //Pitch
   error_pitch = pitch_des - GyroY;
   integral_pitch = integral_pitch_prev + error_pitch*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_pitch = 0;
   }
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -873,7 +877,7 @@ void controlRATE() {
   //Yaw, stablize on rate from GyroZ
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw*dt1;
-  if (channel_1_pwm < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -910,7 +914,7 @@ void scaleCommands() {
   m4_command_PWM = constrain(m4_command_PWM, 0, 180);
 }
 
-void getCommands() {
+void getRadioSticks() {
   //DESCRIPTION: Get raw PWM values for every channel from the radio
   /*
    * Updates radio PWM commands in loop based on current available commands. channel_x_pwm is the raw command used in the rest of 
@@ -918,43 +922,32 @@ void getCommands() {
    * The raw radio commands are filtered with a first order low-pass filter to eliminate any really high frequency noise. 
    */
 
-    channel_1_pwm = getRadioPWM(1);
-    channel_2_pwm = getRadioPWM(2);
-    channel_3_pwm = getRadioPWM(3);
-    channel_4_pwm = getRadioPWM(4);
-    //channel_1_pwm = 1000;
-    //channel_2_pwm = 1500;
-    //channel_3_pwm = 1500;
-    //channel_4_pwm = 1500;
-
-
-    //channel_5_pwm = getRadioPWM(5);
-    //channel_6_pwm = getRadioPWM(6);
-
+    PWM_throttle = getRadioPWM(1);
+    PWM_roll = getRadioPWM(2);
+    PWM_Elevation = getRadioPWM(3);
+    PWM_Rudd = getRadioPWM(4);
+    PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
   float b = 0.7; //Lower=slower, higher=noiser
-  channel_1_pwm = (1.0 - b)*channel_1_pwm_prev + b*channel_1_pwm;
-  channel_2_pwm = (1.0 - b)*channel_2_pwm_prev + b*channel_2_pwm;
-  channel_3_pwm = (1.0 - b)*channel_3_pwm_prev + b*channel_3_pwm;
-  channel_4_pwm = (1.0 - b)*channel_4_pwm_prev + b*channel_4_pwm;
-  channel_1_pwm_prev = channel_1_pwm;
-  channel_2_pwm_prev = channel_2_pwm;
-  channel_3_pwm_prev = channel_3_pwm;
-  channel_4_pwm_prev = channel_4_pwm;
+  PWM_throttle = (1.0 - b)*PWM_throttle_prev + b*PWM_throttle;
+  PWM_roll = (1.0 - b)*PWM_roll_prev + b*PWM_roll;
+  PWM_Elevation = (1.0 - b)*PWM_Elevation_prev + b*PWM_Elevation;
+  PWM_Rudd = (1.0 - b)*PWM_Rudd_prev + b*PWM_Rudd;
+  PWM_throttle_prev = PWM_throttle;
+  PWM_roll_prev =PWM_roll;
+  PWM_Elevation_prev = PWM_Elevation;
+  PWM_Rudd_prev = PWM_Rudd;
 }
 
 void deadBand() {
-  if (abs(channel_1_pwm-1000)<100 ) channel_1_pwm=1000;
-  if (abs(channel_2_pwm-1500)<50) channel_2_pwm=1500;
-  if (abs(channel_3_pwm-1500)<50) channel_3_pwm=1500;
-  if (abs(channel_4_pwm-1500)<50) channel_4_pwm=1500;
+  if (abs(PWM_throttle-1000)<20 ) PWM_throttle=1000;
 }
 
 void failSafe() {
   //DESCRIPTION: If radio gives garbage values, set all commands to default values
   /*
-   * Radio connection failsafe used to check if the getCommands() function is returning acceptable pwm values. If any of 
+   * Radio connection failsafe used to check if the getRadioSticks() function is returning acceptable pwm values. If any of 
    * the commands are lower than 800 or higher than 2200, then we can be certain that there is an issue with the radio
    * connection (most likely hardware related). If any of the channels show this failure, then all of the radio commands 
    * channel_x_pwm are set to default failsafe values specified in the setup. Comment out this function when troubleshooting 
@@ -967,26 +960,19 @@ void failSafe() {
   int check2 = 0;
   int check3 = 0;
   int check4 = 0;
-  int check5 = 0;
-  int check6 = 0;
 
   //Triggers for failure criteria
-  if (channel_1_pwm > maxVal || channel_1_pwm < 1000) check1 = 1;
-  if (channel_2_pwm > maxVal || channel_2_pwm < minVal) check2 = 1;
-  if (channel_3_pwm > maxVal || channel_3_pwm < minVal) check3 = 1;
-  if (channel_4_pwm > maxVal || channel_4_pwm < minVal) check4 = 1;
-  /* Only care about channels 1 and 2 for now
-  if (channel_5_pwm > maxVal || channel_5_pwm < minVal) check5 = 1;
-  if (channel_6_pwm > maxVal || channel_6_pwm < minVal) check6 = 1;
-  */
+  if (PWM_throttle > maxVal || PWM_throttle < minVal) check1 = 1;
+  if (PWM_roll > maxVal ||PWM_roll < minVal) check2 = 1;
+  if (PWM_Elevation > maxVal || PWM_Elevation < minVal) check3 = 1;
+  if (PWM_Rudd > maxVal || PWM_Rudd < minVal) check4 = 1;
+
   //If any failures, set to default failsafe values
-  if ((check1 + check2 + check3 + check4 + check5 + check6) > 0) {
-    channel_1_pwm = channel_1_fs;
-    channel_2_pwm = channel_2_fs;
-    channel_3_pwm = channel_3_fs;
-    channel_4_pwm = channel_4_fs;
-    //channel_5_pwm = channel_5_fs;
-    //channel_6_pwm = channel_6_fs;
+  if ((check1 + check2 + check3 + check4) > 0) {
+    PWM_throttle = PWM_throttle_fs;
+    PWM_roll = PWM_roll_fs;
+    PWM_Elevation = PWM_elevation_fs;
+    PWM_Rudd = PWM_rudd_fs;
   }
 }
 
@@ -1086,20 +1072,27 @@ void switchRollYaw(int reverseRoll, int reverseYaw) {
 void throttleCut() {
   //DESCRIPTION: Directly set actuator outputs to minimum value if triggered
   /*
-   * Monitors the state of radio command channel_1_pwm and directly sets the mx_command_PWM values to minimum (1060 is
+   * Monitors the state of radio command PWM_throttle and directly sets the mx_command_PWM values to minimum (1060 is
    * minimum , 0 is minimum for standard PWM servo library used) if channel 5 is high. This is the last function 
    * called before commandMotors() is called so that the last thing checked is if the user is giving permission to command
    * the motors to anything other than minimum value. Safety first. 
    */
-  if (channel_1_pwm < 1100) {
+  if (PWM_ThrottleCutSwitch < 1300) {killMotors;return;}
+  if (throttle_is_cut&&PWM_ThrottleCutSwitch>1500)
+  {
+    if (PWM_throttle<1040){
+      throttle_is_cut=false;
+    } else killMotors();
+  }
+}
+void killMotors(){
+    throttle_is_cut=true;
     m1_command_PWM = 0;
     m2_command_PWM = 0;
     m3_command_PWM = 0;
     m4_command_PWM = 0;
-  }
 }
-
-void loopRate(int freq) {
+void tock(int freq) {
   //DESCRIPTION: Regulate main loop rate to specified frequency in Hz
   /*
    * It's good to operate at a constant loop rate for filters to remain stable and whatnot. Interrupt routines running in the
@@ -1149,15 +1142,15 @@ void printRadioData() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
     Serial.print(F(" CH1: "));
-    Serial.print(channel_1_pwm);
+    Serial.print(PWM_throttle);
     Serial.print(F(" CH2: "));
-    Serial.print(channel_2_pwm);
+    Serial.print(PWM_roll);
     Serial.print(F(" CH3: "));
-    Serial.print(channel_3_pwm);
+    Serial.print(PWM_Elevation);
     Serial.print(F(" CH4: "));
-    Serial.println(channel_4_pwm);
-    //Serial.print(F(" CH5: "));
-    //Serial.print(channel_5_pwm);
+    Serial.println(PWM_Rudd);
+    Serial.print(F(" CH5: "));
+    Serial.print(PWM_ThrottleCutSwitch);
     //Serial.print(F(" CH6: "));
     //Serial.println(channel_6_pwm);
   }
@@ -1239,7 +1232,7 @@ void printMotorCommands() {
   }
 }
 
-void printLoopRate() {
+void printtock() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
     Serial.print(F("dt1 = "));
@@ -1294,20 +1287,20 @@ void radioSetup()
   
     //PWM Receiver
     //Declare interrupt pins 
-    pinMode(ch1Pin, INPUT_PULLUP);
-    pinMode(ch2Pin, INPUT_PULLUP);
-    pinMode(ch3Pin, INPUT_PULLUP);
-    pinMode(ch4Pin, INPUT_PULLUP);
-    //pinMode(ch5Pin, INPUT_PULLUP);
-    //pinMode(ch6Pin, INPUT_PULLUP);
+    pinMode(throttlePin, INPUT_PULLUP);
+    pinMode(rollPin, INPUT_PULLUP);
+    pinMode(upDownPin, INPUT_PULLUP);
+    pinMode(ruddPin, INPUT_PULLUP);
+    pinMode(throttleCutSwitchPin, INPUT_PULLUP);
+    
     delay(20);
     //Attach interrupt and point to corresponding ISR functions
-    attachInterrupt(digitalPinToInterrupt(ch1Pin), getCh1, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ch2Pin), getCh2, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ch3Pin), getCh3, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ch4Pin), getCh4, CHANGE);
-    //attachInterrupt(digitalPinToInterrupt(ch5Pin), getCh5, CHANGE);
-    //attachInterrupt(digitalPinToInterrupt(ch6Pin), getCh6, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(throttlePin), getCh1, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(rollPin), getCh2, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(upDownPin), getCh3, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ruddPin), getCh4, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(throttleCutSwitchPin), getCh5, CHANGE);
+    
     delay(20);
 }
 
@@ -1341,7 +1334,7 @@ unsigned long getRadioPWM(int ch_num) {
 //INTERRUPT SERVICE ROUTINES (for reading PWM and PPM)
 
 void getCh1() {
-  int trigger = digitalRead(ch1Pin);
+  int trigger = digitalRead(throttlePin);
   if(trigger == 1) {
     rising_edge_start_1 = micros();
   }
@@ -1351,7 +1344,7 @@ void getCh1() {
 }
 
 void getCh2() {
-  int trigger = digitalRead(ch2Pin);
+  int trigger = digitalRead(rollPin);
   if(trigger == 1) {
     rising_edge_start_2 = micros();
   }
@@ -1361,7 +1354,7 @@ void getCh2() {
 }
 
 void getCh3() {
-  int trigger = digitalRead(ch3Pin);
+  int trigger = digitalRead(upDownPin);
   if(trigger == 1) {
     rising_edge_start_3 = micros();
   }
@@ -1371,7 +1364,7 @@ void getCh3() {
 }
 
 void getCh4() {
-  int trigger = digitalRead(ch4Pin);
+  int trigger = digitalRead(ruddPin);
   if(trigger == 1) {
     rising_edge_start_4 = micros();
   }
@@ -1381,21 +1374,11 @@ void getCh4() {
 }
 
 void getCh5() {
-  int trigger = digitalRead(ch5Pin);
+  int trigger = digitalRead(throttleCutSwitchPin);
   if(trigger == 1) {
     rising_edge_start_5 = micros();
   }
   else if(trigger == 0) {
     channel_5_raw = micros() - rising_edge_start_5;
-  }
-}
-
-void getCh6() {
-  int trigger = digitalRead(ch6Pin);
-  if(trigger == 1) {
-    rising_edge_start_6 = micros();
-  }
-  else if(trigger == 0) {
-    channel_6_raw = micros() - rising_edge_start_6;
   }
 }
