@@ -1,6 +1,6 @@
 //Rawpter 1.0 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
-//Go to https://raisingawesome.set/projects for more info
+//Go to https://raisingawesome.site/projects for more info
 //MIT License - use for any purpose you want
 
 #include <SPI.h>
@@ -22,7 +22,7 @@
 #define IMUTIMING 104
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
-#define BATTERYTYPE 14.8V
+#define BATTERYTYPE 14.8
 int batteryVoltage=1023; //just a default for the battery monitoring routine 
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
