@@ -89,6 +89,12 @@ const int upDownPin = stickRightVertical; //ele
 const int ruddPin = stickLeftHorizontal; //rudd
 const int throttleCutSwitchPin = SwitchA; //gear (throttle cut)
 
+//variables for reading PWM from the radio receiver
+unsigned long rising_edge_start_1, rising_edge_start_2, rising_edge_start_3, rising_edge_start_4, rising_edge_start_5, rising_edge_start_6; 
+unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw;
+int ppm_counter = 0;
+unsigned long time_ms = 0;
+
 //Motor Electronic Speed Control Modules (ESC):
 const int m1Pin = 14;
 const int m2Pin = 15;
@@ -953,46 +959,9 @@ void printtock() {
   }
 }
 
-//=========================================================================================//
-
-//HELPER FUNCTIONS
-
-float invSqrt(float x) {
-  //Fast inverse sqrt for madgwick filter
-  /*
-  float halfx = 0.5f * x;
-  float y = x;
-  long i = *(long*)&y;
-  i = 0x5f3759df - (i>>1);
-  y = *(float*)&i;
-  y = y * (1.5f - (halfx * y * y));
-  y = y * (1.5f - (halfx * y * y));
-  return y;
-  */
-  /*
-  //alternate form:
-  unsigned int i = 0x5F1F1412 - (*(unsigned int*)&x >> 1);
-  float tmp = *(float*)&i;
-  float y = tmp * (1.69000231f - 0.714158168f * x * tmp * tmp);
-  return y;
-  */
-  return 1.0/sqrtf(x);
-}
-
-//Arduino/Teensy Flight Controller - dRehmFlight
-//Author: Nicholas Rehm
-//Project Start: 1/6/2020
-//Last Updated: 7/29/2022
-//Version: Beta 1.3
-
 //========================================================================================================================//
 
 //This file contains all necessary functions and code used for radio communication to avoid cluttering the main code
-
-unsigned long rising_edge_start_1, rising_edge_start_2, rising_edge_start_3, rising_edge_start_4, rising_edge_start_5, rising_edge_start_6; 
-unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw;
-int ppm_counter = 0;
-unsigned long time_ms = 0;
 
 void radioSetup()
 {
