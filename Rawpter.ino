@@ -7,15 +7,26 @@
 #include <WiFiNINA.h> //WiFi
 #include <Arduino_LSM6DSOX.h> //IMU
 #include <Servo.h>
+#include <MadgwickAHRS.h>
 
 //========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
 //========================================================================================================================//
 #define DEBUG false
 
-float batteryType=14.8; //code handles 14.8 or 7.4V LIPOs.  Used for detecting and alerting a low battery. If not hooked up, it will pull down and beep often.
+//EASYCHAIR is used to put in some key dummy variables so you can sit in the easy chair with just the Arduino on a cord wiggling it around and seeing how it responds.
+//Set EASYCHAIR to false when you are wanting to install it in the drone.
+#define EASYCHAIR false
+
+//The IMUTIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.
+#define IMUTIMING 104
+
+//The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
+#define BATTERYTYPE 14.8
+int batteryVoltage=1023; //just a default for the battery monitoring routine 
+
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
-//These are for it to stay stable and descend safely versus cut throttle and drop like a rock.
+//These are for it to stay stable and descend safely versus totally cutting throttle and drop like a rock.
 unsigned long PWM_throttle_zero = 1000; //used when we want to take throttle to zero.  Failsafe is something higher as it is expected that failsafe is a value needed to safely land.
 unsigned long PWM_throttle_fs = 1200; //throttle  will allow it to descend to the ground
 unsigned long PWM_roll_fs = 1500; //ail pretty much in the middle so it quits turning
@@ -23,19 +34,18 @@ unsigned long PWM_elevation_fs = 1500; //elev
 unsigned long PWM_rudd_fs = 1500; //rudd
 unsigned long PWM_ThrottleCutSwitch_fs = 2000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
 
+//IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
+float AccErrorX = 0.01;
+float AccErrorY = -0.01;
+float AccErrorZ = 0.01;
+float GyroErrorX = 0.42;
+float GyroErrorY= 0.07;
+float GyroErrorZ = -0.05;
+
 //Filter parameters - Defaults tuned for 2kHz loop rate; Do not touch unless you know what you are doing:
 float B_madgwick = 0.04;  //Madgwick filter parameter
 float B_accel = 0.14;     //Accelerometer LP filter paramter, (MPU6050 default: 0.14. MPU9250 default: 0.2)
 float B_gyro = 0.1;       //Gyro LP filter paramter, (MPU6050 default: 0.1. MPU9250 default: 0.17)
-float B_mag = 1.0;        //Magnetometer LP filter parameter
-
-//IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
-float AccErrorX = 0.01;
-float AccErrorY = -0.02;
-float AccErrorZ = 0.01;
-float GyroErrorX = 0.43;
-float GyroErrorY= 0.12;
-float GyroErrorZ = 0.04;
 
 //Controller parameters (take note of defaults before modifying!): 
 float i_limit = 25.0;     //Integrator saturation level, mostly for safety (default 25.0)
@@ -90,8 +100,8 @@ Servo m1PWM, m2PWM, m3PWM, m4PWM;
 //DECLARE GLOBAL VARIABLES
 //========================================================================================================================//
 
-//General stuff
-float dt1;
+//General stuff for controlling timing of things
+float deltaTime;
 unsigned long current_time, prev_time;
 unsigned long print_counter, serial_counter;
 unsigned long blink_counter, blink_delay;
@@ -100,20 +110,17 @@ bool beeping=false; //for beeping when the battery is getting low.
 bool throttle_is_cut=true; //used to force the pilot to manually set the throttle to zero after the switch is used to throttle cut
 
 //Radio communication:
-unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwitch, channel_6_pwm;
+unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwitch;
 unsigned long PWM_throttle_prev,PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
 
 //IMU:
+Madgwick filter; //the library tool that will convert the IMU data to angular data
 float AccX, AccY, AccZ;
 float AccX_prev, AccY_prev, AccZ_prev;
 float GyroX, GyroY, GyroZ;
 float GyroX_prev, GyroY_prev, GyroZ_prev;
 float roll_IMU, pitch_IMU, yaw_IMU;
 float roll_IMU_prev, pitch_IMU_prev;
-float q0 = 1.0f; //Initialize quaternion for madgwick filter
-float q1 = 0.0f;
-float q2 = 0.0f;
-float q3 = 0.0f;
 
 //Normalized desired state:
 float thro_des, roll_des, pitch_des, yaw_des;
@@ -135,9 +142,7 @@ int status = WL_IDLE_STATUS;
 bool ALLOW_WIFI=false;
 
 WiFiServer server(80);
-int batteryVoltage=1023;
 //WiFi End
-
 
 //========================================================================================================================//
 //BEGIN THE CLASSIC SETUP AND LOOP
@@ -145,21 +150,67 @@ int batteryVoltage=1023;
 
 void setup() {
   //Bootup operations 
+  filter.begin(IMUTIMING); //initiate the calculations to determine the drone attitude angles
   setupSerial();
   setupBatteryMonitor();
-  if (ALLOW_WIFI) setupWiFi(); //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
   setupDrone();
+  if (ALLOW_WIFI) setupWiFi(); //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
 }
 
 void loop() {
   tick(); //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
-
-  //The main thread that infinitely loops - poleing sensors and taking action.
-  if (ALLOW_WIFI) loopWiFi();
   loopBuzzer();
-  loopDrone();
+  //The main thread that infinitely loops - poling sensors and taking action.
+  if (ALLOW_WIFI) loopWiFi(); else loopDrone(); //For the first few seconds after bootup, you have the opportunity to connect to the wifi.
 
-  tock(2000); //Do not exceed 2000Hz, all filter parameters tuned to 2000Hz by default
+  tock(IMUTIMING); //Do not exceed 2000Hz, all filter parameters tuned to 104Hz by default
+}
+
+void setupDrone() {  
+  //Initialize all pins
+  if (DEBUG) Serial.println("initializing1");
+  pinMode(m1Pin, OUTPUT);
+  pinMode(m2Pin, OUTPUT);
+  pinMode(m3Pin, OUTPUT);
+  pinMode(m4Pin, OUTPUT);
+  m1PWM.attach(m1Pin,1060,1860);
+  m2PWM.attach(m2Pin,1060,1860);
+  m3PWM.attach(m3Pin,1060,1860);
+  m4PWM.attach(m4Pin,1060,1860);
+  //Set built in LED to turn on to signal startup
+  delay(5);
+
+  //Initialize radio communication
+  radioSetup();
+  PWM_throttle = PWM_throttle_zero;
+  PWM_roll = PWM_roll_fs;
+  PWM_Elevation = PWM_elevation_fs;
+  PWM_Rudd = PWM_rudd_fs;
+  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs;
+  
+  //Initialize IMU communication
+  IMUinit();
+
+  delay(5);
+
+  //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
+  //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
+
+  delay(5);
+  if (DEBUG) Serial.println("Initializing");
+
+  if (getRadioPWM(1)>1800&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
+  
+  m1_command_PWM = 0; //Default for motor stopped for Simonk firmware
+  m2_command_PWM = 0;
+  m3_command_PWM = 0;
+  m4_command_PWM = 0;
+
+  while (getRadioPWM(1)>1060&&getRadioPWM(1)<800&!EASYCHAIR) //wait until the throttle is turned down before allowing anything else to happen.
+  {
+    delay(1000);
+  }
+  //calibrateAttitude();
 }
 
 void setupBatteryMonitor()
@@ -191,7 +242,7 @@ void loopBuzzer()
   }
 
   batteryVoltage=analogRead(A6);
-  if (batteryType==14.8)
+  if (BATTERYTYPE==14.8)
   {
     if (batteryVoltage>604) buzzer_spacing=40000;
     else if (batteryVoltage>580) buzzer_spacing=30000;
@@ -211,7 +262,7 @@ void loopBuzzer()
 }
 
 void Troubleshooting() {
-  //Print data at 100hz (uncomment one at a time for troubleshooting) - SELECT ONE:
+  //Print data at 100hz (uncomment one at a time for troubleshooting)
     //printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
     //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
     //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
@@ -220,11 +271,12 @@ void Troubleshooting() {
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
     //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
     //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
+    printJSON();
   }
 
 
 void setupSerial(){
-  Serial.begin(57600);
+  Serial.begin(230400);
   
   delay(1000);
   if (DEBUG) Serial.println("I got mine!");
@@ -247,7 +299,7 @@ void setupWiFi()
     if (DEBUG) Serial.println("Please upgrade the firmware");
   }
 
-  // Just picked this out of the air.  Through back to Jeff Gordon
+  // Just picked this out of the air.  Throw back to Jeff Gordon
   WiFi.config(IPAddress(192, 168, 2, 4));
 
   // print the network name (SSID);
@@ -262,8 +314,8 @@ void setupWiFi()
     while (true);
   }
 
-  // wait 10 seconds for connection:
-  delay(10000);
+  // wait 1 seconds for connection:
+  delay(1000);
 
   // start the web server on port 80
   server.begin();
@@ -301,25 +353,6 @@ void loopWiFi() {
           // if the current line is blank, you got two newline characters in a row.
           // that's the end of the client HTTP request, so send a response:
           if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println();
-
-            // the content of the HTTP response follows the header:
-            client.print("<head>");
-            client.print("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-            client.print("<link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\" integrity=\"sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3\" crossorigin=\"anonymous\">");
-            client.print("</head>");
-            client.print("<style>");
-            client.print("</style>");
-            client.print("<div class='container'>");
-            client.print("<h1>Rawpter V0.1 Alpha</h1>");
-            client.print("</div>");
-            client.print("<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js\" integrity=\"sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p\" crossorigin=\"anonymous\"></script>");
-            client.println(); // The HTTP response ends with another blank line:
-            // break out of the while loop:
             break;
           } else {    // if you got a newline, then clear currentLine:
             currentLine = "";
@@ -327,8 +360,15 @@ void loopWiFi() {
         } else if (c != '\r') {  // if you got anything else but a carriage return character,
           currentLine += c;      // add it to the end of the currentLine
         }
-        if (currentLine.endsWith("GET /BL")) {
-          //digitalWrite(LEDB, LOW);             
+        if (currentLine.endsWith("GET /Begin"))
+        {
+          //Handle clicking the Begin button
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Starting Drone!</div>");
+          ALLOW_WIFI=false;             
+        } 
+        else if (currentLine.endsWith("GET / HTTP"))
+        { //Handle hitting the basic page (1st connection)
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><a href='/Begin' class='btn btn-secondary'>Begin</a>");
         }
       }
     }
@@ -337,7 +377,27 @@ void loopWiFi() {
     if (DEBUG) Serial.println("client disconnected");
   }
 }
+void MakeWebPage(WiFiClient client, String html)
+{
+  // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
+  // and a content-type so the client knows what's coming, then a blank line:
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-type:text/html");
+  client.println();
 
+  // the content of the HTTP response follows the header:
+  client.print("<head>");
+  client.print("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  client.print("<link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css\" rel=\"stylesheet\" integrity=\"sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3\" crossorigin=\"anonymous\">");
+  client.print("</head>");
+  client.print("<style>");
+  client.print("</style>");
+  client.print("<div class='container'>");
+  client.print(html);
+  client.print("</div>");
+  client.print("<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js\" integrity=\"sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p\" crossorigin=\"anonymous\"></script>");
+  client.println(); // The HTTP response ends with another blank line:
+}
 void printWiFiStatus() {
   // print the SSID of the network you're attached to:
   if (DEBUG) Serial.print("SSID: ");
@@ -353,87 +413,12 @@ void printWiFiStatus() {
   if (DEBUG) Serial.println(ip);
 }
 
-//========================================================================================================================//
-//                                                      VOID SETUP                                                        //                           
-//========================================================================================================================//
-
-void setupDrone() {  
-  //Initialize all pins
-  if (DEBUG) Serial.println("initializing1");
-  pinMode(m1Pin, OUTPUT);
-  pinMode(m2Pin, OUTPUT);
-  pinMode(m3Pin, OUTPUT);
-  pinMode(m4Pin, OUTPUT);
-  m1PWM.attach(m1Pin,1060,1860);
-  m2PWM.attach(m2Pin,1060,1860);
-  m3PWM.attach(m3Pin,1060,1860);
-  m4PWM.attach(m4Pin,1060,1860);
-  //Set built in LED to turn on to signal startup
-  delay(5);
-
-  //Initialize radio communication
-  radioSetup();
-  PWM_throttle = PWM_throttle_zero;
-  PWM_roll = PWM_roll_fs;
-  PWM_Elevation = PWM_elevation_fs;
-  PWM_Rudd = PWM_rudd_fs;
-  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs;
-  
-  //Initialize IMU communication
-  IMUinit();
-
-  delay(5);
-
-  //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
-  //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
-
-  delay(5);
-  if (DEBUG) Serial.println("Initializing");
-
-  if (getRadioPWM(1)>1800) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
-  
-  m1_command_PWM = 0; //Default for motor stopped for Simonk firmware
-  m2_command_PWM = 0;
-  m3_command_PWM = 0;
-  m4_command_PWM = 0;
-
-  while (getRadioPWM(1)>1060&getRadioPWM(1)<800) //wait until the throttle is turned down before allowing anything else to happen.
-  {
-    delay(1000);
-  }
-
-  if (DEBUG) Serial.println("blinking");
-  //Indicate entering main loop with 3 quick blinks
-  setupBlink(3,160,70); //numBlinks, upTime (ms), downTime (ms)
-}
-
-//========================================================================================================================//
-//                                                       MAIN LOOP                                                        //                           
-//========================================================================================================================//
-
-void loopDrone() {
-  loopBlink(); //Indicates that we are in main loop with short blink every 1.5 seconds
-  getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
-  Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ, dt1); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
-  getDesiredAnglesAndThrottle(); //Convert raw commands to normalized values based on saturated control limits
-  controlANGLE(); //Stabilize on angle setpoint from getDesiredAnglesAndThrottle
-  controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
-  scaleCommands(); //Scales motor commands to 0-1
-  throttleCut(); //Directly sets motor commands to off based on channel 5 being switched
-  //Troubleshooting(); //will do the print routines if uncommented
-  commandMotors(); //Sends command pulses to each motor pin
-  getRadioSticks(); //Gets the PWM from the receiver
-  failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
-  deadBand(); //allows for a bit of deadband on the throttle;
-
-}
-
 void tick()
 {
   //Keep track of what time it is and how much time has elapsed since the last loop
   prev_time = current_time;      
   current_time = micros();      
-  dt1 = (current_time - prev_time)/1000000.0;
+  deltaTime = (current_time - prev_time)/1000000.0;
 }
 //========================================================================================================================//
 //                                                      FUNCTIONS                                                         //                           
@@ -452,7 +437,6 @@ void controlMixer() {
    *thro_des - direct thottle control
    *roll_PID, pitch_PID, yaw_PID - stabilized axis variables
    *roll_passthru, pitch_passthru, yaw_passthru - direct unstabilized command passthrough
-   *channel_6_pwm - free auxillary channel, can be used to toggle things with an 'if' statement
    */
    
   //Quad mixing - EXAMPLE
@@ -467,7 +451,7 @@ void IMUinit() {
   if (!IMU.begin()) {
     if (DEBUG) Serial.println("Failed to initialize IMU!");
     while (true) {if (DEBUG) Serial.println("IMU Failed"); delay(2000);}
-  } 
+  }
 }
 
 void getIMUdata() {
@@ -480,10 +464,11 @@ void getIMUdata() {
    * the readings. The filter parameters B_gyro and B_accel are set to be good for a 2kHz loop rate. Finally,
    * the constant errors found in calculate_IMU_error() on startup are subtracted from the accelerometer and gyro readings.
    */
-  float AcX,AcY,AcZ,GyX,GyY,GyZ;
  //Accelerometer
  
   if (IMU.accelerationAvailable()) {
+  float AcX,AcY,AcZ;
+
     IMU.readAcceleration(AcX, AcY, AcZ);
     AccX = AcX; //G's
     AccY = AcY;
@@ -491,17 +476,11 @@ void getIMUdata() {
     //Correct the outputs with the calculated error values
     AccX = AccX - AccErrorX;
     AccY = AccY - AccErrorY;
-    AccZ = AccZ - AccErrorZ;
-    //LP filter accelerometer data
-    AccX = (1.0 - B_accel)*AccX_prev + B_accel*AccX;
-    AccY = (1.0 - B_accel)*AccY_prev + B_accel*AccY;
-    AccZ = (1.0 - B_accel)*AccZ_prev + B_accel*AccZ;
-    AccX_prev = AccX;
-    AccY_prev = AccY;
-    AccZ_prev = AccZ;
+
   }
   if (IMU.gyroscopeAvailable()) {
   //Gyro
+    float GyX,GyY,GyZ;
     IMU.readGyroscope(GyX, GyY, GyZ);
     GyroX = GyX; //deg/sec
     GyroY = GyY;
@@ -510,13 +489,6 @@ void getIMUdata() {
     GyroX = GyroX - GyroErrorX;
     GyroY = GyroY - GyroErrorY;
     GyroZ = GyroZ - GyroErrorZ;
-    //LP filter gyro data
-    GyroX = (1.0 - B_gyro)*GyroX_prev + B_gyro*GyroX;
-    GyroY = (1.0 - B_gyro)*GyroY_prev + B_gyro*GyroY;
-    GyroZ = (1.0 - B_gyro)*GyroZ_prev + B_gyro*GyroZ;
-    GyroX_prev = GyroX;
-    GyroY_prev = GyroY;
-    GyroZ_prev = GyroZ;
   }
 }
 
@@ -525,20 +497,14 @@ void calculate_IMU_error() {
   /*
    * Don't worry too much about what this is doing. The error values it computes are applied to the raw gyro and 
    * accelerometer values AccX, AccY, AccZ, GyroX, GyroY, GyroZ in getIMUdata(). This eliminates drift in the
-   * measurement. 
+   * measurement.
    */
   float AcX,AcY,AcZ,GyX,GyY,GyZ;
   
   //Read IMU values 12000 times
   int c = 0;
   while (c < 12000) {
-    /*
-    #if defined USE_MPU6050_I2C
-      mpu6050.getMotion6(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ);
-    #elif defined USE_MPU9250_SPI
-      mpu9250.getMotion9(&AcX, &AcY, &AcZ, &GyX, &GyY, &GyZ, &MgX, &MgY, &MgZ);
-    #endif
-    */
+    
     IMU.readAcceleration(AcX, AcY, AcZ);
     IMU.readGyroscope(GyX, GyY, GyZ);
     AccX  = AcX;
@@ -598,95 +564,21 @@ void calibrateAttitude() {
    */
   //Warm up IMU and madgwick filter in simulated main loop
   for (int i = 0; i <= 10000; i++) {
-    prev_time = current_time;      
-    current_time = micros();      
-    dt1 = (current_time - prev_time)/1000000.0; 
+    tick();
     getIMUdata();
-    Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ, dt1);
-    tock(2000); //do not exceed 2000Hz
+    Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ);
+    tock(IMUTIMING); //do not exceed 2000Hz
   }
 }
+void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
+{
+      // update the filter, which computes orientation
+    filter.updateIMU(gx, gy, gz, ax, ay, az);
 
-void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az, float invSampleFreq) {
-  //DESCRIPTION: Attitude estimation through sensor fusion - 6DOF
-  /*
-   * See description of Madgwick() for more information. This is a 6DOF implimentation for when magnetometer data is not
-   * available (for example when using the recommended MPU6050 IMU for the default setup).
-   */
-  float recipNorm;
-  float s0, s1, s2, s3;
-  float qDot1, qDot2, qDot3, qDot4;
-  float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2 ,_8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
-
-  //Convert gyroscope degrees/sec to radians/sec
-  gx *= 0.0174533f;
-  gy *= 0.0174533f;
-  gz *= 0.0174533f;
-
-  //Rate of change of quaternion from gyroscope
-  qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
-  qDot2 = 0.5f * (q0 * gx + q2 * gz - q3 * gy);
-  qDot3 = 0.5f * (q0 * gy - q1 * gz + q3 * gx);
-  qDot4 = 0.5f * (q0 * gz + q1 * gy - q2 * gx);
-
-  //Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-  if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
-    //Normalise accelerometer measurement
-    recipNorm = invSqrt(ax * ax + ay * ay + az * az);
-    ax *= recipNorm;
-    ay *= recipNorm;
-    az *= recipNorm;
-
-    //Auxiliary variables to avoid repeated arithmetic
-    _2q0 = 2.0f * q0;
-    _2q1 = 2.0f * q1;
-    _2q2 = 2.0f * q2;
-    _2q3 = 2.0f * q3;
-    _4q0 = 4.0f * q0;
-    _4q1 = 4.0f * q1;
-    _4q2 = 4.0f * q2;
-    _8q1 = 8.0f * q1;
-    _8q2 = 8.0f * q2;
-    q0q0 = q0 * q0;
-    q1q1 = q1 * q1;
-    q2q2 = q2 * q2;
-    q3q3 = q3 * q3;
-
-    //Gradient decent algorithm corrective step
-    s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
-    s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
-    s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
-    s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
-    recipNorm = invSqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3); //normalise step magnitude
-    s0 *= recipNorm;
-    s1 *= recipNorm;
-    s2 *= recipNorm;
-    s3 *= recipNorm;
-
-    //Apply feedback step
-    qDot1 -= B_madgwick * s0;
-    qDot2 -= B_madgwick * s1;
-    qDot3 -= B_madgwick * s2;
-    qDot4 -= B_madgwick * s3;
-  }
-
-  //Integrate rate of change of quaternion to yield quaternion
-  q0 += qDot1 * invSampleFreq;
-  q1 += qDot2 * invSampleFreq;
-  q2 += qDot3 * invSampleFreq;
-  q3 += qDot4 * invSampleFreq;
-
-  //Normalise quaternion
-  recipNorm = invSqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-  q0 *= recipNorm;
-  q1 *= recipNorm;
-  q2 *= recipNorm;
-  q3 *= recipNorm;
-
-  //Compute angles
-  roll_IMU = atan2(q0*q1 + q2*q3, 0.5f - q1*q1 - q2*q2)*57.29577951; //degrees
-  pitch_IMU = -asin(-2.0f * (q1*q3 - q0*q2))*57.29577951; //degrees
-  yaw_IMU = -atan2(q1*q2 + q0*q3, 0.5f - q2*q2 - q3*q3)*57.29577951; //degrees
+    // print the heading, pitch and roll
+    roll_IMU = filter.getRoll();
+    pitch_IMU = filter.getPitch();
+    yaw_IMU = filter.getYaw();
 }
 
 void getDesiredAnglesAndThrottle() {
@@ -731,7 +623,7 @@ void controlANGLE() {
   
   //Roll
   error_roll = roll_des - roll_IMU;
-  integral_roll = integral_roll_prev + error_roll*dt1;
+  integral_roll = integral_roll_prev + error_roll*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
@@ -741,7 +633,7 @@ void controlANGLE() {
 
   //Pitch
   error_pitch = pitch_des - pitch_IMU;
-  integral_pitch = integral_pitch_prev + error_pitch*dt1;
+  integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_pitch = 0;
   }
@@ -751,12 +643,12 @@ void controlANGLE() {
 
   //Yaw, stablize on rate from GyroZ
   error_yaw = yaw_des - GyroZ;
-  integral_yaw = integral_yaw_prev + error_yaw*dt1;
+  integral_yaw = integral_yaw_prev + error_yaw*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
-  derivative_yaw = (error_yaw - error_yaw_prev)/dt1; 
+  derivative_yaw = (error_yaw - error_yaw_prev)/deltaTime; 
   yaw_PID = .01*(Kp_yaw*error_yaw + Ki_yaw*integral_yaw + Kd_yaw*derivative_yaw); //Scaled by .01 to bring within -1 to 1 range
 
   //Update roll variables
@@ -801,18 +693,16 @@ void getRadioSticks() {
 
   //Low-pass the critical commands and update previous values
   float b = 0.7; //Lower=slower, higher=noiser
+
   PWM_throttle = (1.0 - b)*PWM_throttle_prev + b*PWM_throttle;
   PWM_roll = (1.0 - b)*PWM_roll_prev + b*PWM_roll;
   PWM_Elevation = (1.0 - b)*PWM_Elevation_prev + b*PWM_Elevation;
   PWM_Rudd = (1.0 - b)*PWM_Rudd_prev + b*PWM_Rudd;
+
   PWM_throttle_prev = PWM_throttle;
   PWM_roll_prev =PWM_roll;
   PWM_Elevation_prev = PWM_Elevation;
   PWM_Rudd_prev = PWM_Rudd;
-}
-
-void deadBand() {
-  if (abs(PWM_throttle-1000)<20 ) PWM_throttle=1000;
 }
 
 void failSafe() {
@@ -827,19 +717,10 @@ void failSafe() {
   
   unsigned minVal = 800;
   unsigned maxVal = 2200;
-  int check1 = 0;
-  int check2 = 0;
-  int check3 = 0;
-  int check4 = 0;
 
   //Triggers for failure criteria
-  if (PWM_throttle > maxVal || PWM_throttle < minVal) check1 = 1;
-  if (PWM_roll > maxVal ||PWM_roll < minVal) check2 = 1;
-  if (PWM_Elevation > maxVal || PWM_Elevation < minVal) check3 = 1;
-  if (PWM_Rudd > maxVal || PWM_Rudd < minVal) check4 = 1;
-
-  //If any failures, set to default failsafe values
-  if ((check1 + check2 + check3 + check4) > 0) {
+  if (PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
+  {
     PWM_throttle = PWM_throttle_fs;
     PWM_roll = PWM_roll_fs;
     PWM_Elevation = PWM_elevation_fs;
@@ -853,15 +734,14 @@ void commandMotors() {
   m2PWM.write(m2_command_PWM);
   m3PWM.write(m3_command_PWM);
   m4PWM.write(m4_command_PWM);
-  if (DEBUG) Serial.println("made it to bottom of commandmotors");  
+  if (DEBUG) Serial.println("Made it to bottom of commandmotors");  
 }
 
 void calibrateESCs() {
   //DESCRIPTION: Used in void setup() to allow standard ESC calibration procedure with the radio to take place.
   /*  
    *  Simulates the void loop(), but only for the purpose of providing throttle pass through to the motors, so that you can
-   *  power up with throttle at full, let ESCs begin arming sequence, and lower throttle to zero. This function should only be
-   *  uncommented when performing an ESC calibration.
+   *  power up with throttle at full, let ESCs begin arming sequence, and lower throttle to zero.
    */
   m1PWM.write(180);
   m2PWM.write(180);
@@ -875,71 +755,6 @@ void calibrateESCs() {
   delay(5000);
 }
 
-float floatFaderLinear(float param, float param_min, float param_max, float fadeTime, int state, int loopFreq){
-  //DESCRIPTION: Linearly fades a float type variable between min and max bounds based on desired high or low state and time
-  /*  
-   *  Takes in a float variable, desired minimum and maximum bounds, fade time, high or low desired state, and the loop frequency 
-   *  and linearly interpolates that param variable between the maximum and minimum bounds. This function can be called in controlMixer()
-   *  and high/low states can be determined by monitoring the state of an auxillarly radio channel. For example, if channel_6_pwm is being 
-   *  monitored to switch between two dynamic configurations (hover and forward flight), this function can be called within the logical 
-   *  statements in order to fade controller gains, for example between the two dynamic configurations. The 'state' (1 or 0) can be used
-   *  to designate the two final options for that control gain based on the dynamic configuration assignment to the auxillary radio channel.
-   *  
-   */
-  float diffParam = (param_max - param_min)/(fadeTime*loopFreq); //Difference to add or subtract from param for each loop iteration for desired fadeTime
-
-  if (state == 1) { //Maximum param bound desired, increase param by diffParam for each loop iteration
-    param = param + diffParam;
-  }
-  else if (state == 0) { //Minimum param bound desired, decrease param by diffParam for each loop iteration
-    param = param - diffParam;
-  }
-
-  param = constrain(param, param_min, param_max); //Constrain param within max bounds
-  
-  return param;
-}
-
-float floatFaderLinear2(float param, float param_des, float param_lower, float param_upper, float fadeTime_up, float fadeTime_down, int loopFreq){
-  //DESCRIPTION: Linearly fades a float type variable from its current value to the desired value, up or down
-  /*  
-   *  Takes in a float variable to be modified, desired new position, upper value, lower value, fade time, and the loop frequency 
-   *  and linearly fades that param variable up or down to the desired value. This function can be called in controlMixer()
-   *  to fade up or down between flight modes monitored by an auxillary radio channel. For example, if channel_6_pwm is being 
-   *  monitored to switch between two dynamic configurations (hover and forward flight), this function can be called within the logical 
-   *  statements in order to fade controller gains, for example between the two dynamic configurations. 
-   *  
-   */
-  if (param > param_des) { //Need to fade down to get to desired
-    float diffParam = (param_upper - param_des)/(fadeTime_down*loopFreq);
-    param = param - diffParam;
-  }
-  else if (param < param_des) { //Need to fade up to get to desired
-    float diffParam = (param_des - param_lower)/(fadeTime_up*loopFreq);
-    param = param + diffParam;
-  }
-
-  param = constrain(param, param_lower, param_upper); //Constrain param within max bounds
-  
-  return param;
-}
-
-void switchRollYaw(int reverseRoll, int reverseYaw) {
-  //DESCRIPTION: Switches roll_des and yaw_des variables for tailsitter-type configurations
-  /*
-   * Takes in two integers (either 1 or -1) corresponding to the desired reversing of the roll axis and yaw axis, respectively.
-   * Reversing of the roll or yaw axis may be needed when switching between the two for some dynamic configurations. Inputs of 1, 1 does not 
-   * reverse either of them, while -1, 1 will reverse the output corresponding to the new roll axis. 
-   * This function may be replaced in the future by a function that switches the IMU data instead (so that angle can also be estimated with the 
-   * IMU tilted 90 degrees from default level).
-   */
-  float switch_holder;
-
-  switch_holder = yaw_des;
-  yaw_des = reverseYaw*roll_des;
-  roll_des = reverseRoll*switch_holder;
-}
-
 void throttleCut() {
   //DESCRIPTION: Directly set actuator outputs to minimum value if triggered
   /*
@@ -948,7 +763,12 @@ void throttleCut() {
    * called before commandMotors() is called so that the last thing checked is if the user is giving permission to command
    * the motors to anything other than minimum value. Safety first. 
    */
-  if (PWM_ThrottleCutSwitch < 1300) {killMotors;return;}
+  if (EASYCHAIR) {
+    //This is set above in compiler directives for when you are testing the Arduino outside of the drone.
+    throttle_is_cut=false;
+    return;
+  }
+  if (PWM_ThrottleCutSwitch < 1300) { killMotors(); return; }
   if (throttle_is_cut&&PWM_ThrottleCutSwitch>1500)
   {
     if (PWM_throttle<1040){
@@ -957,6 +777,7 @@ void throttleCut() {
   }
 }
 void killMotors(){
+  //sets the PWM to its lowest value to shut off a motor such as whne the throttle cut switch is fliped.
     throttle_is_cut=true;
     m1_command_PWM = 0;
     m2_command_PWM = 0;
@@ -968,9 +789,8 @@ void tock(int freq) {
   /*
    * It's good to operate at a constant loop rate for filters to remain stable and whatnot. Interrupt routines running in the
    * background cause the loop rate to fluctuate. This function basically just waits at the end of every loop iteration until 
-   * the correct time has passed since the start of the current loop for the desired loop rate in Hz. 2kHz is a good rate to 
-   * be at because the loop nominally will run between 2.8kHz - 4.2kHz. This lets us have a little room to add extra computations
-   * and remain above 2kHz, without needing to retune all of our filtering parameters.
+   * the correct time has passed since the start of the current loop for the desired loop rate in Hz. I have matched 
+   * it to the Gyro update frequency.
    */
   float invFreq = 1.0/freq*1000000.0;
   unsigned long checker = micros();
@@ -999,16 +819,6 @@ void loopBlink() {
   }
 }
 
-void setupBlink(int numBlinks,int upTime, int downTime) {
-  //DESCRIPTION: Simple function to make LED on board blink as desired
-  for (int j = 1; j<= numBlinks; j++) {
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(downTime);
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(upTime);
-  }
-}
-
 void printRadioData() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
@@ -1022,8 +832,6 @@ void printRadioData() {
     Serial.println(PWM_Rudd);
     Serial.print(F(" CH5: "));
     Serial.print(PWM_ThrottleCutSwitch);
-    //Serial.print(F(" CH6: "));
-    //Serial.println(channel_6_pwm);
   }
 }
 
@@ -1064,7 +872,27 @@ void printAccelData() {
     Serial.println(AccZ);
   }
 }
-
+void printJSON(){
+  if (current_time - print_counter > 10000) {
+    print_counter = micros();
+    Serial.print(F("{\"roll\": "));
+    Serial.print(roll_IMU);
+    Serial.print(F(", \"pitch\": "));
+    Serial.print(pitch_IMU);
+    Serial.print(F(", \"yaw\": "));
+    Serial.print(yaw_IMU);
+    
+    Serial.print(F(", \"m1\": "));
+    Serial.print(m1_command_PWM);
+    Serial.print(F(", \"m2\": "));
+    Serial.print(m2_command_PWM);
+    Serial.print(F(", \"m3\": "));
+    Serial.print(m3_command_PWM);
+    Serial.print(F(", \"m4\": "));
+    Serial.print(m4_command_PWM);
+    Serial.println("}");
+  }
+}
 void printRollPitchYaw() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
@@ -1074,6 +902,7 @@ void printRollPitchYaw() {
     Serial.print(pitch_IMU);
     Serial.print(F(" yaw: "));
     Serial.println(yaw_IMU);
+
   }
 }
 
@@ -1106,8 +935,8 @@ void printMotorCommands() {
 void printtock() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
-    Serial.print(F("dt1 = "));
-    Serial.println(dt1*1000000.0);
+    Serial.print(F("deltaTime = "));
+    Serial.println(deltaTime*1000000.0);
   }
 }
 
@@ -1148,14 +977,12 @@ float invSqrt(float x) {
 //This file contains all necessary functions and code used for radio communication to avoid cluttering the main code
 
 unsigned long rising_edge_start_1, rising_edge_start_2, rising_edge_start_3, rising_edge_start_4, rising_edge_start_5, rising_edge_start_6; 
-unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw, channel_6_raw;
+unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw;
 int ppm_counter = 0;
 unsigned long time_ms = 0;
 
 void radioSetup()
 {
-
-  
     //PWM Receiver
     //Declare interrupt pins 
     pinMode(throttlePin, INPUT_PULLUP);
@@ -1194,9 +1021,6 @@ unsigned long getRadioPWM(int ch_num) {
   else if (ch_num == 5) {
     returnPWM = channel_5_raw;
   }
-  else if (ch_num == 6) {
-    returnPWM = channel_6_raw;
-  }  
   return returnPWM;
 }
 
