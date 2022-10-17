@@ -28,11 +28,11 @@ int batteryVoltage=1023; //just a default for the battery monitoring routine
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
 //These are for it to stay stable and descend safely versus totally cutting throttle and drop like a rock.
 unsigned long PWM_throttle_zero = 1000; //used when we want to take throttle to zero.  Failsafe is something higher as it is expected that failsafe is a value needed to safely land.
-unsigned long PWM_throttle_fs = 1200; //throttle  will allow it to descend to the ground
+unsigned long PWM_throttle_fs = 1100; //throttle  will allow it to descend to the ground if you adjust the throttlecutswitch_fs to 2000
 unsigned long PWM_roll_fs = 1500; //ail pretty much in the middle so it quits turning
 unsigned long PWM_elevation_fs = 1500; //elev
 unsigned long PWM_rudd_fs = 1500; //rudd
-unsigned long PWM_ThrottleCutSwitch_fs = 2000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
+unsigned long PWM_ThrottleCutSwitch_fs = 1000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
 
 bool failsafed=false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
@@ -733,7 +733,7 @@ void failSafe() {
     PWM_roll = PWM_roll_fs;
     PWM_Elevation = PWM_elevation_fs;
     PWM_Rudd = PWM_rudd_fs;
-    PWM_ThrottleCutSwitch=2000; //this is so the throttle cut routine doesn't override the fail safes.
+    PWM_ThrottleCutSwitch=PWM_ThrottleCutSwitch_fs; //this is so the throttle cut routine doesn't override the fail safes.
   } else failsafed=false;
   if (EASYCHAIR) PWM_throttle=2000;//For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
 }
