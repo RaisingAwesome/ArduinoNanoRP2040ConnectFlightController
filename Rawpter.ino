@@ -22,7 +22,7 @@
 #define IMUTIMING 104
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
-#define BATTERYTYPE 7.4
+#define BATTERYTYPE 14.8V
 int batteryVoltage=1023; //just a default for the battery monitoring routine 
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
@@ -34,6 +34,7 @@ unsigned long PWM_elevation_fs = 1500; //elev
 unsigned long PWM_rudd_fs = 1500; //rudd
 unsigned long PWM_ThrottleCutSwitch_fs = 2000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
 
+bool failsafed=false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
 float AccErrorX = 0.01;
 float AccErrorY = -0.01;
@@ -41,11 +42,6 @@ float AccErrorZ = 0.01;
 float GyroErrorX = 0.42;
 float GyroErrorY= 0.07;
 float GyroErrorZ = -0.05;
-
-//Filter parameters - Defaults tuned for 2kHz loop rate; Do not touch unless you know what you are doing:
-float B_madgwick = 0.04;  //Madgwick filter parameter
-float B_accel = 0.14;     //Accelerometer LP filter paramter, (MPU6050 default: 0.14. MPU9250 default: 0.2)
-float B_gyro = 0.1;       //Gyro LP filter paramter, (MPU6050 default: 0.1. MPU9250 default: 0.17)
 
 //Controller parameters (take note of defaults before modifying!): 
 float i_limit = 25.0;     //Integrator saturation level, mostly for safety (default 25.0)
@@ -461,8 +457,8 @@ void controlMixer() {
   //Quad mixing - EXAMPLE
   m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front left
   m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front right
-  m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right????sean note:(probably left)
-  m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Right
+  m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
+  m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
 }
 
 void IMUinit() {
@@ -475,14 +471,6 @@ void IMUinit() {
 
 void getIMUdata() {
   //DESCRIPTION: Request full dataset from IMU and LP filter gyro, accelerometer, and magnetometer data
-  /*
-   * Reads accelerometer, gyro, and magnetometer data from IMU as AccX, AccY, AccZ, GyroX, GyroY, GyroZ. 
-   * These values are scaled according to the IMU datasheet to put them into correct units of g's, deg/sec, and uT. A simple first-order
-   * low-pass filter is used to get rid of high frequency noise in these raw signals. Generally you want to cut
-   * off everything past 80Hz, but if your loop rate is not fast enough, the low pass filter will cause a lag in
-   * the readings. The filter parameters B_gyro and B_accel are set to be good for a 2kHz loop rate. Finally,
-   * the constant errors found in calculate_IMU_error() on startup are subtracted from the accelerometer and gyro readings.
-   */
  //Accelerometer
  
   if (IMU.accelerationAvailable()) {
@@ -738,13 +726,16 @@ void failSafe() {
   unsigned maxVal = 2200;
 
   //Triggers for failure criteria
-  if (PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
+  if (PWM_ThrottleCutSwitch>maxVal || PWM_ThrottleCutSwitch<minVal || PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
   {
+    failsafed=true;
     PWM_throttle = PWM_throttle_fs;
     PWM_roll = PWM_roll_fs;
     PWM_Elevation = PWM_elevation_fs;
     PWM_Rudd = PWM_rudd_fs;
-  }
+    PWM_ThrottleCutSwitch=2000; //this is so the throttle cut routine doesn't override the fail safes.
+  } else failsafed=false;
+  if (EASYCHAIR) PWM_throttle=2000;//For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
 }
 
 void commandMotors() {
@@ -909,6 +900,45 @@ void printJSON(){
     Serial.print(m3_command_PWM);
     Serial.print(F(", \"m4\": "));
     Serial.print(m4_command_PWM);
+    
+    Serial.print(F(", \"AccX\": "));
+    Serial.print(AccX);
+    Serial.print(F(", \"AccY\": "));
+    Serial.print(AccY);
+    Serial.print(F(", \"AccZ\": "));
+    Serial.print(AccZ);
+
+    Serial.print(F(", \"GyroX\": "));
+    Serial.print(GyroX);
+    Serial.print(F(", \"GyroY\": "));
+    Serial.print(GyroY);
+    Serial.print(F(", \"GyroZ\": "));
+    Serial.print(GyroZ);
+
+    Serial.print(F(", \"ThroDes\": "));
+    Serial.print(thro_des);
+    Serial.print(F(", \"RollDes\": "));
+    Serial.print(roll_des);
+    Serial.print(F(", \"PitchDes\": "));
+    Serial.print(pitch_des);
+    Serial.print(F(", \"YawDes\": "));
+    Serial.print(yaw_des);
+
+    Serial.print(F(", \"PWM_throttle\": "));
+    Serial.print(PWM_throttle);
+    Serial.print(F(", \"PWM_roll\": "));
+    Serial.print(PWM_roll);
+    Serial.print(F(", \"PWM_Elevation\": "));
+    Serial.print(PWM_Elevation);
+    Serial.print(F(", \"PWM_Rudd\": "));
+    Serial.print(PWM_Rudd);
+    Serial.print(F(", \"PWM_ThrottleCutSwitch\": "));
+    Serial.print(PWM_ThrottleCutSwitch);
+
+    Serial.print(F(", \"Failsafe\": "));
+    Serial.print(failsafed);
+
+
     Serial.println("}");
   }
 }
@@ -921,7 +951,6 @@ void printRollPitchYaw() {
     Serial.print(pitch_IMU);
     Serial.print(F(" yaw: "));
     Serial.println(yaw_IMU);
-
   }
 }
 
