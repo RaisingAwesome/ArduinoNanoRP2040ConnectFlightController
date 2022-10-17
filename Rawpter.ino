@@ -22,7 +22,7 @@
 #define IMUTIMING 104
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
-#define BATTERYTYPE 14.8
+#define BATTERYTYPE 7.4
 int batteryVoltage=1023; //just a default for the battery monitoring routine 
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
@@ -201,18 +201,31 @@ void setupDrone() {
 
   if (getRadioPWM(1)>1800&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
   
-  m1_command_PWM = 0; //Default for motor stopped for Simonk firmware
+  m1_command_PWM = 0; //Will send the default for motor stopped for Simonk firmware
   m2_command_PWM = 0;
   m3_command_PWM = 0;
   m4_command_PWM = 0;
 
-  while (getRadioPWM(1)>1060&&getRadioPWM(1)<800&!EASYCHAIR) //wait until the throttle is turned down before allowing anything else to happen.
+  while (getRadioPWM(1)>1060&!EASYCHAIR&&getRadioPWM(5)<1300) //wait until the throttle is turned down before allowing anything else to happen.
   {
     delay(1000);
   }
   //calibrateAttitude();
 }
-
+void loopDrone() {
+  loopBlink(); //Indicates that we are in main loop with short blink every 1.5 seconds
+  getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
+  Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
+  getDesiredAnglesAndThrottle(); //Convert raw commands to normalized values based on saturated control limits
+  controlANGLE(); //Stabilize on angle setpoint from getDesiredAnglesAndThrottle
+  controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
+  scaleCommands(); //Scales motor commands to 0-1
+  throttleCut(); //Directly sets motor commands to off based on channel 5 being switched
+  Troubleshooting(); //will do the print routines if uncommented
+  commandMotors(); //Sends command pulses to each motor pin
+  getRadioSticks(); //Gets the PWM from the receiver
+  failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
+}
 void setupBatteryMonitor()
 {
   buzzer_millis=millis();  
