@@ -12,14 +12,12 @@
 //========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
 //========================================================================================================================//
-#define DEBUG false
-
 //EASYCHAIR is used to put in some key dummy variables so you can sit in the easy chair with just the Arduino on a cord wiggling it around and seeing how it responds.
 //Set EASYCHAIR to false when you are wanting to install it in the drone.
 #define EASYCHAIR false
 
-//The IMUTIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.
-#define IMUTIMING 104
+//The LOOP_TIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.
+#define LOOP_TIMING 100
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
 #define BATTERYTYPE 14.8
@@ -39,9 +37,11 @@ bool failsafed=false;
 float AccErrorX = 0.01;
 float AccErrorY = -0.01;
 float AccErrorZ = 0.01;
+float Accel_filter=0.14;
 float GyroErrorX = 0.42;
 float GyroErrorY= 0.07;
 float GyroErrorZ = -0.05;
+float Gyro_filter = 0.14;
 
 //Controller parameters (take note of defaults before modifying!): 
 float i_limit = 25.0;     //Integrator saturation level, mostly for safety (default 25.0)
@@ -49,24 +49,17 @@ float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~7
 float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxYaw = 160.0;     //Max yaw rate in deg/sec (default 160.0)
 
-float Kp_roll_angle = 0.2;    //Roll P-gain - angle mode 
-float Ki_roll_angle = 0.3;    //Roll I-gain - angle mode
-float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode
+float Kp_roll_angle = 0.8;    //Roll P-gain - angle mode default .2
+float Ki_roll_angle = 0.3;    //Roll I-gain - angle mode default .3
+float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode default 0.05
 
-float Kp_pitch_angle = 0.2;   //Pitch P-gain - angle mode
-float Ki_pitch_angle = 0.3;   //Pitch I-gain - angle mode
-float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode
+float Kp_pitch_angle = 0.8;   //Pitch P-gain - angle mode default .2
+float Ki_pitch_angle = 0.3;   //Pitch I-gain - angle mode default .3
+float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode default .05
 
-float Kp_roll_rate = 0.15;    //Roll P-gain - rate mode
-float Ki_roll_rate = 0.2;     //Roll I-gain - rate mode
-float Kd_roll_rate = 0.0002;  //Roll D-gain - rate mode (be careful when increasing too high, motors will begin to overheat!)
-float Kp_pitch_rate = 0.15;   //Pitch P-gain - rate mode
-float Ki_pitch_rate = 0.2;    //Pitch I-gain - rate mode
-float Kd_pitch_rate = 0.0002; //Pitch D-gain - rate mode (be careful when increasing too high, motors will begin to overheat!)
-
-float Kp_yaw = 0.3;           //Yaw P-gain
-float Ki_yaw = 0.05;          //Yaw I-gain
-float Kd_yaw = 0.00015;       //Yaw D-gain (be careful when increasing too high, motors will begin to overheat!)
+float Kp_yaw = 0.3;           //Yaw P-gain default .3
+float Ki_yaw = 0.05;          //Yaw I-gain default .05
+float Kd_yaw = 0.00015;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
 
 //========================================================================================================================//
 //                                                     DECLARE PINS                                                       //                           
@@ -87,15 +80,21 @@ const int throttleCutSwitchPin = SwitchA; //gear (throttle cut)
 
 //variables for reading PWM from the radio receiver
 unsigned long rising_edge_start_1, rising_edge_start_2, rising_edge_start_3, rising_edge_start_4, rising_edge_start_5, rising_edge_start_6; 
-unsigned long channel_1_raw, channel_2_raw, channel_3_raw, channel_4_raw, channel_5_raw;
+unsigned long channel_1_raw=0;
+unsigned long channel_2_raw=0;
+unsigned long channel_3_raw=0;
+unsigned long channel_4_raw=0;
+unsigned long channel_5_raw=0;
+
 int ppm_counter = 0;
 unsigned long time_ms = 0;
-
+int throttleCutCounter=0;
+int throttleNotCutCounter=0;
 //Motor Electronic Speed Control Modules (ESC):
-const int m1Pin = 14;
-const int m2Pin = 15;
-const int m3Pin = 16;
-const int m4Pin = 10; // (17 should have worked, but doesn't)
+const int m1Pin = 10; //10
+const int m2Pin = 15; //15
+const int m3Pin = 16; //16
+const int m4Pin = 14; //14
 Servo m1PWM, m2PWM, m3PWM, m4PWM;
 
 //========================================================================================================================//
@@ -103,11 +102,11 @@ Servo m1PWM, m2PWM, m3PWM, m4PWM;
 //========================================================================================================================//
 
 //General stuff for controlling timing of things
-float deltaTime;
+float deltaTime; float mt=0;
+float invFreq = (1.0/LOOP_TIMING)*1000000.0;
+
 unsigned long current_time, prev_time;
 unsigned long print_counter, serial_counter;
-unsigned long blink_counter, blink_delay;
-bool blinkAlternate;
 bool beeping=false; //for beeping when the battery is getting low.
 bool throttle_is_cut=true; //used to force the pilot to manually set the throttle to zero after the switch is used to throttle cut
 
@@ -116,7 +115,7 @@ unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwi
 unsigned long PWM_throttle_prev,PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
 
 //IMU:
-Madgwick filter; //the library tool that will convert the IMU data to angular data
+Madgwick IMU_Data; //the library tool that will convert the IMU data to angular data
 float AccX, AccY, AccZ;
 float AccX_prev, AccY_prev, AccZ_prev;
 float GyroX, GyroY, GyroZ;
@@ -152,7 +151,7 @@ WiFiServer server(80);
 
 void setup() {
   //Bootup operations 
-  filter.begin(IMUTIMING); //initiate the calculations to determine the drone attitude angles
+  IMU_Data.begin(LOOP_TIMING); //initiate the calculations to determine the drone attitude angles
   setupSerial();
   setupBatteryMonitor();
   setupDrone();
@@ -161,16 +160,17 @@ void setup() {
 
 void loop() {
   tick(); //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
-  loopBuzzer();
+  //loopBuzzer();
   //The main thread that infinitely loops - poling sensors and taking action.
-  if (ALLOW_WIFI) loopWiFi(); else loopDrone(); //For the first few seconds after bootup, you have the opportunity to connect to the wifi.
-
-  tock(IMUTIMING); //Do not exceed 2000Hz, all filter parameters tuned to 104Hz by default
+  
+  if (ALLOW_WIFI) loopWiFi();
+  loopDrone();
+  tock(LOOP_TIMING);
 }
 
 void setupDrone() {  
   //Initialize all pins
-  if (DEBUG) Serial.println("initializing1");
+
   pinMode(m1Pin, OUTPUT);
   pinMode(m2Pin, OUTPUT);
   pinMode(m3Pin, OUTPUT);
@@ -198,24 +198,21 @@ void setupDrone() {
   //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
   //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
 
-  delay(5);
-  if (DEBUG) Serial.println("Initializing");
-
-  if (getRadioPWM(1)>1800&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
+  if (getRadioPWM(1)>1800&&getRadioPWM(1)<2400&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
   
   m1_command_PWM = 0; //Will send the default for motor stopped for Simonk firmware
   m2_command_PWM = 0;
   m3_command_PWM = 0;
   m4_command_PWM = 0;
 
-  while (getRadioPWM(1)>1060&!EASYCHAIR&&getRadioPWM(5)<1300) //wait until the throttle is turned down before allowing anything else to happen.
+  while (getRadioPWM(1)>1060&&getRadioPWM(1)<2400&!EASYCHAIR&&getRadioPWM(5)<1300) //wait until the throttle is turned down before allowing anything else to happen.
   {
     delay(1000);
   }
   //calibrateAttitude();
 }
+
 void loopDrone() {
-  loopBlink(); //Indicates that we are in main loop with short blink every 1.5 seconds
   getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
   Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
   getDesiredAnglesAndThrottle(); //Convert raw commands to normalized values based on saturated control limits
@@ -228,6 +225,7 @@ void loopDrone() {
   getRadioSticks(); //Gets the PWM from the receiver
   failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
 }
+
 void setupBatteryMonitor()
 {
   buzzer_millis=millis();  
@@ -237,6 +235,7 @@ void setupBatteryMonitor()
 
 void loopBuzzer()
 { //this monitors the battery.  the lower it gets, the faster it beeps.
+  
   if (!beeping){    
     if ( millis()-buzzer_millis>(buzzer_spacing) )
     {
@@ -248,11 +247,9 @@ void loopBuzzer()
   {
     if (millis()-buzzer_millis>80)
     {
-      if (DEBUG) Serial.println("About to go low");
       beeping=false;
       buzzer_millis=millis();
       digitalWrite(9,LOW);  
-      if (DEBUG) Serial.println("About to go lower");
     }
   }
 
@@ -285,16 +282,14 @@ void Troubleshooting() {
     //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
     //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
-    //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations)
-    printJSON();
+    //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations and less the Gyro/Acc update speed.  Set by LOOP_TIMING)
+    if (EASYCHAIR) printJSON();
   }
 
 
 void setupSerial(){
-  Serial.begin(230400);
-  
+  Serial.begin(2000000);
   delay(1000);
-  if (DEBUG) Serial.println("I got mine!");
 }
 
 void setupWiFi()
@@ -304,27 +299,21 @@ void setupWiFi()
 
   // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
-    if (DEBUG) Serial.println("Communication with WiFi module failed!");
     // don't continue because this is probably not an RP2040
     while (true);
   }
 
   String fv = WiFi.firmwareVersion();
   if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
-    if (DEBUG) Serial.println("Please upgrade the firmware");
+    Serial.println("Please upgrade the firmware");
   }
 
   // Just picked this out of the air.  Throw back to Jeff Gordon
   WiFi.config(IPAddress(192, 168, 2, 4));
 
-  // print the network name (SSID);
-  if (DEBUG) Serial.print("Creating access point named: ");
-  if (DEBUG) Serial.println(ssid);
-
   // Create open network. Change this line if you want to create an WEP network:
   status = WiFi.beginAP(ssid, pass);
   if (status != WL_AP_LISTENING) {
-    if (DEBUG) Serial.println("Creating access point failed");
     // don't continue
     while (true);
   }
@@ -334,9 +323,6 @@ void setupWiFi()
 
   // start the web server on port 80
   server.begin();
-
-  // you're connected now, so print out the status
-  printWiFiStatus();
 }
 
 void loopWiFi() {
@@ -347,22 +333,17 @@ void loopWiFi() {
 
     if (status == WL_AP_CONNECTED) {
       // a device has connected to the AP
-      if (DEBUG) Serial.println("Device connected to AP");
     } else {
       // a device has disconnected from the AP, and we are back in listening mode
-      if (DEBUG) Serial.println("Device disconnected from AP");
     }
   }
   
   WiFiClient client = server.available();   // listen for incoming clients
-
    if (client) {                             // if you get a client,
-    if (DEBUG) Serial.println("new client");           // print a message out the serial port
     String currentLine = "";                // make a String to hold incoming data from the client
     while (client.connected()) {            // loop while the client's connected
       if (client.available()) {             // if there's bytes to read from the client,
         char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out the serial monitor
         if (c == '\n') {                    // if the byte is a newline character
 
           // if the current line is blank, you got two newline characters in a row.
@@ -375,23 +356,60 @@ void loopWiFi() {
         } else if (c != '\r') {  // if you got anything else but a carriage return character,
           currentLine += c;      // add it to the end of the currentLine
         }
-        if (currentLine.endsWith("GET /Begin"))
+        if (currentLine.endsWith("GET /One"))
         {
           //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Starting Drone!</div>");
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .1 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
+          ALLOW_WIFI=false;
+          Kp_pitch_angle = 0.1; 
+        }
+        else if (currentLine.endsWith("GET /Two"))
+        {
+          //Handle clicking the Begin button
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .2 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
+          ALLOW_WIFI=false;  
+          Kp_pitch_angle = 0.2; 
+        }
+        else if (currentLine.endsWith("GET /Three"))
+        {
+          //Handle clicking the Begin button
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .3 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
           ALLOW_WIFI=false;             
+          Kp_pitch_angle = 0.3;
+           
         } 
+        else if (currentLine.endsWith("GET /Four"))
+        {
+          //Handle clicking the Begin button
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .4 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
+          ALLOW_WIFI=false;
+          Kp_pitch_angle = 0.4;          
+        }
+        else if (currentLine.endsWith("GET /Five"))
+        {
+          //Handle clicking the Begin button
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .5 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
+          ALLOW_WIFI=false;
+          Kp_pitch_angle = 0.5;          
+        }
+        else if (currentLine.endsWith("GET /Six"))
+        {
+          //Handle clicking the Begin button
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .6 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
+          ALLOW_WIFI=false;
+          Kp_pitch_angle = 0.6;          
+        }
         else if (currentLine.endsWith("GET / HTTP"))
         { //Handle hitting the basic page (1st connection)
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><a href='/Begin' class='btn btn-secondary'>Begin</a>");
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1>Choose a gain constant for pitch to continue.  The higher the gain, the quicker the response to the stick.<br><div class='d-flex justify-content-between flex-wrap'><a href='/One' class='m-2 btn btn-secondary'>K pitch=.1</a><a href='/Two' class='m-2 btn btn-secondary'>K pitch=.2</a><a href='/Three' class='m-2 btn btn-secondary'>K pitch=.3</a><a href='/Four' class='m-2 btn btn-secondary'>K pitch=.4</a><a href='/Five' class='m-2 btn btn-secondary'>K pitch=.5</a><a href='/Six' class='m-2 btn btn-secondary'>K pitch=.6</a></div>");
         }
       }
     }
     // close the connection:
     client.stop();
-    if (DEBUG) Serial.println("client disconnected");
   }
 }
+
 void MakeWebPage(WiFiClient client, String html)
 {
   // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
@@ -413,31 +431,18 @@ void MakeWebPage(WiFiClient client, String html)
   client.print("<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js\" integrity=\"sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p\" crossorigin=\"anonymous\"></script>");
   client.println(); // The HTTP response ends with another blank line:
 }
-void printWiFiStatus() {
-  // print the SSID of the network you're attached to:
-  if (DEBUG) Serial.print("SSID: ");
-  if (DEBUG) Serial.println(WiFi.SSID());
-
-  // print your WiFi shield's IP address:
-  IPAddress ip = WiFi.localIP();
-  if (DEBUG) Serial.print("IP Address: ");
-  if (DEBUG) Serial.println(ip);
-
-  // print where to go in a browser:
-  if (DEBUG) Serial.print("To see this page in action, open a browser to http://");
-  if (DEBUG) Serial.println(ip);
-}
 
 void tick()
 {
   //Keep track of what time it is and how much time has elapsed since the last loop
-  prev_time = current_time;      
-  current_time = micros();      
-  deltaTime = (current_time - prev_time)/1000000.0;
+  prev_time = current_time;
+  current_time = micros();
+  deltaTime = (current_time - prev_time)/1000000.0; //division takes it from micros to seconds.  1000000 ms=1 second
 }
 //========================================================================================================================//
 //                                                      FUNCTIONS                                                         //                           
 //========================================================================================================================//
+
 void controlMixer() {
   //DESCRIPTION: Mixes scaled commands from PID controller to actuator outputs based on vehicle configuration
   /*
@@ -454,18 +459,23 @@ void controlMixer() {
    *roll_passthru, pitch_passthru, yaw_passthru - direct unstabilized command passthrough
    */
    
-  //Quad mixing - EXAMPLE
-  m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front left
-  m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front right
-  m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
-  m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
+  //Quad mixing
+  //m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front left
+  //m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front right
+  //m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
+  //m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
+
+  m1_command_scaled = thro_des + pitch_PID + roll_PID + yaw_PID; //Front left
+  m2_command_scaled = thro_des + pitch_PID - roll_PID - yaw_PID; //Front right
+  m3_command_scaled = thro_des - pitch_PID - roll_PID + yaw_PID; //Back Right
+  m4_command_scaled = thro_des - pitch_PID + roll_PID - yaw_PID; //Back Left
+
 }
 
 void IMUinit() {
   //DESCRIPTION: Initialize IMU
-  if (!IMU.begin()) {
-    if (DEBUG) Serial.println("Failed to initialize IMU!");
-    while (true) {if (DEBUG) Serial.println("IMU Failed"); delay(2000);}
+  if (!IMU.begin()) {  
+    while (true) ;
   }
 }
 
@@ -474,28 +484,31 @@ void getIMUdata() {
  //Accelerometer
  
   if (IMU.accelerationAvailable()) {
-  float AcX,AcY,AcZ;
-
-    IMU.readAcceleration(AcX, AcY, AcZ);
-    AccX = AcX; //G's
-    AccY = AcY;
-    AccZ = AcZ;
-    //Correct the outputs with the calculated error values
+    IMU.readAcceleration(AccX, AccY, AccZ);
     AccX = AccX - AccErrorX;
     AccY = AccY - AccErrorY;
-
-  }
+    AccY = AccY - AccErrorZ;
+    //Correct the outputs with the calculated error values
+    AccX = (1.0 - Accel_filter)*AccX_prev + Accel_filter*AccX;
+    AccY = (1.0 - Accel_filter)*AccY_prev + Accel_filter*AccY;
+    AccZ = (1.0 - Accel_filter)*AccZ_prev + Accel_filter*AccZ;
+    AccX_prev = AccX;
+    AccY_prev = AccY;
+    AccZ_prev = AccZ;
+  } else return;
   if (IMU.gyroscopeAvailable()) {
   //Gyro
-    float GyX,GyY,GyZ;
-    IMU.readGyroscope(GyX, GyY, GyZ);
-    GyroX = GyX; //deg/sec
-    GyroY = GyY;
-    GyroZ = GyZ;
+    IMU.readGyroscope(GyroX, GyroY, GyroZ);
     //Correct the outputs with the calculated error values
     GyroX = GyroX - GyroErrorX;
     GyroY = GyroY - GyroErrorY;
     GyroZ = GyroZ - GyroErrorZ;
+    GyroX = (1.0 -Gyro_filter)*GyroX_prev +Gyro_filter*GyroX;
+    GyroY = (1.0 -Gyro_filter)*GyroY_prev +Gyro_filter*GyroY;
+    GyroZ = (1.0 -Gyro_filter)*GyroZ_prev +Gyro_filter*GyroZ;
+    GyroX_prev = GyroX;
+    GyroY_prev = GyroY;
+    GyroZ_prev = GyroZ;
   }
 }
 
@@ -574,18 +587,18 @@ void calibrateAttitude() {
     tick();
     getIMUdata();
     Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ);
-    tock(IMUTIMING); //do not exceed 2000Hz
+    tock(LOOP_TIMING); //gyro update frequency
   }
 }
 void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
 {
       // update the filter, which computes orientation
-    filter.updateIMU(gx, gy, gz, ax, ay, az);
+    IMU_Data.updateIMU(gx, gy, gz, ax, ay, az);
 
     // print the heading, pitch and roll
-    roll_IMU = filter.getRoll();
-    pitch_IMU = filter.getPitch();
-    yaw_IMU = filter.getYaw();
+    roll_IMU = IMU_Data.getRoll();
+    pitch_IMU = IMU_Data.getPitch();
+    yaw_IMU = IMU_Data.getYaw();
 }
 
 void getDesiredAnglesAndThrottle() {
@@ -600,7 +613,7 @@ void getDesiredAnglesAndThrottle() {
   thro_des = (PWM_throttle - 1000.0)/1000.0; //Between 0 and 1
   roll_des = (PWM_roll - 1500.0)/500.0; //Between -1 and 1
   pitch_des = (PWM_Elevation - 1500.0)/500.0; //Between -1 and 1
-  yaw_des = (PWM_Rudd - 1500.0)/500.0; //Between -1 and 1
+  yaw_des = (PWM_Rudd - 1500.0)/500.0; //Between -1 and 1 
   roll_passthru = roll_des/2.0; //Between -0.5 and 0.5
   pitch_passthru = pitch_des/2.0; //Between -0.5 and 0.5
   yaw_passthru = yaw_des/2.0; //Between -0.5 and 0.5
@@ -634,8 +647,9 @@ void controlANGLE() {
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
+
   integral_roll = constrain(integral_roll, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
-  derivative_roll = GyroX;
+  derivative_roll = GyroX; //(roll_des-roll_IMU-roll_des-previous_IMU)/dt=current angular velocity since last IMU read and therefore GyroX in deg/s
   roll_PID = 0.01*(Kp_roll_angle*error_roll + Ki_roll_angle*integral_roll - Kd_roll_angle*derivative_roll); //Scaled by .01 to bring within -1 to 1 range
 
   //Pitch
@@ -644,11 +658,12 @@ void controlANGLE() {
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_pitch = 0;
   }
+  
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
   derivative_pitch = GyroY;
   pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
 
-  //Yaw, stablize on rate from GyroZ
+  //Yaw, stablize on rate from GyroZ versus angle.  In other words, your stick is setting y axis rotation speed - not the angle to get to.
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
@@ -657,7 +672,7 @@ void controlANGLE() {
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
   derivative_yaw = (error_yaw - error_yaw_prev)/deltaTime; 
   yaw_PID = .01*(Kp_yaw*error_yaw + Ki_yaw*integral_yaw + Kd_yaw*derivative_yaw); //Scaled by .01 to bring within -1 to 1 range
-
+ 
   //Update roll variables
   integral_roll_prev = integral_roll;
   //Update pitch variables
@@ -672,16 +687,11 @@ void scaleCommands() {
   /*
    * The actual pulse width is set at the servo attach.
    */
-  m1_command_PWM = m1_command_scaled*180;
-  m2_command_PWM = m2_command_scaled*180;
-  m3_command_PWM = m3_command_scaled*180;
-  m4_command_PWM = m4_command_scaled*180;
   //Constrain commands to motors within Simonk bounds
-  //1400, full throttle at 2000us
-  m1_command_PWM = constrain(m1_command_PWM, 0, 180);
-  m2_command_PWM = constrain(m2_command_PWM, 0, 180);
-  m3_command_PWM = constrain(m3_command_PWM, 0, 180);
-  m4_command_PWM = constrain(m4_command_PWM, 0, 180);
+  m1_command_PWM = constrain(m1_command_PWM*180, 0, 180);
+  m2_command_PWM = constrain(m2_command_PWM*180, 0, 180);
+  m3_command_PWM = constrain(m3_command_PWM*180, 0, 180);
+  m4_command_PWM = constrain(m4_command_PWM*180, 0, 180);
 }
 
 void getRadioSticks() {
@@ -699,7 +709,7 @@ void getRadioSticks() {
     PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
-  float b = 0.7; //Lower=slower, higher=noiser
+  float b = 0.7; //Lower=slower, higher=noiser default 0.7
 
   PWM_throttle = (1.0 - b)*PWM_throttle_prev + b*PWM_throttle;
   PWM_roll = (1.0 - b)*PWM_roll_prev + b*PWM_roll;
@@ -722,11 +732,14 @@ void failSafe() {
    * your radio connection in case any extreme values are triggering this function to overwrite the printed variables.
    */
   
-  unsigned minVal = 800;
-  unsigned maxVal = 2200;
 
   //Triggers for failure criteria
-  if (PWM_ThrottleCutSwitch>maxVal || PWM_ThrottleCutSwitch<minVal || PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
+  //unsigned minVal = 800;
+  //unsigned maxVal = 2200;
+  //if (PWM_ThrottleCutSwitch>maxVal || PWM_ThrottleCutSwitch<minVal || PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
+  
+  
+  if (PWM_throttle > 800 || PWM_throttle < 2200) //this is the less conservative version to get through this routine faster.
   {
     failsafed=true;
     PWM_throttle = PWM_throttle_fs;
@@ -735,7 +748,8 @@ void failSafe() {
     PWM_Rudd = PWM_rudd_fs;
     PWM_ThrottleCutSwitch=PWM_ThrottleCutSwitch_fs; //this is so the throttle cut routine doesn't override the fail safes.
   } else failsafed=false;
-  if (EASYCHAIR) PWM_throttle=2000;//For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
+  
+  if (EASYCHAIR) PWM_throttle=1500;//For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
 }
 
 void commandMotors() {
@@ -744,7 +758,6 @@ void commandMotors() {
   m2PWM.write(m2_command_PWM);
   m3PWM.write(m3_command_PWM);
   m4PWM.write(m4_command_PWM);
-  if (DEBUG) Serial.println("Made it to bottom of commandmotors");  
 }
 
 void calibrateESCs() {
@@ -778,22 +791,34 @@ void throttleCut() {
     throttle_is_cut=false;
     return;
   }
-  if (PWM_ThrottleCutSwitch < 1300) { killMotors(); return; }
-  if (throttle_is_cut&&PWM_ThrottleCutSwitch>1500)
-  {
-    if (PWM_throttle<1040){
-      throttle_is_cut=false;
-    } else killMotors();
+  if (throttle_is_cut) killMotors(); //make sure we keep those motors at 0 if the throttle was cut.
+
+  if (PWM_ThrottleCutSwitch < 1300) { 
+    //throttleCutCounter will ensure it is not just a blip that has caused a false cut.
+    if (++throttleCutCounter>20) killMotors(); 
+    return;    
   }
+  if (throttle_is_cut&&PWM_ThrottleCutSwitch>1500)
+  { 
+    //reset only if throttle is down to prevent a jolting suprise 
+    if (PWM_throttle<1040&&++throttleNotCutCounter>20){  
+      throttle_is_cut=false;
+      throttleNotCutCounter=0;
+      throttleCutCounter=0;
+    } else killMotors();
+    return;
+  }  
 }
+
 void killMotors(){
   //sets the PWM to its lowest value to shut off a motor such as whne the throttle cut switch is fliped.
-    throttle_is_cut=true;
+    throttle_is_cut=true;    
     m1_command_PWM = 0;
     m2_command_PWM = 0;
     m3_command_PWM = 0;
     m4_command_PWM = 0;
 }
+
 void tock(int freq) {
   //DESCRIPTION: Regulate main loop rate to specified frequency in Hz
   /*
@@ -801,32 +826,9 @@ void tock(int freq) {
    * background cause the loop rate to fluctuate. This function basically just waits at the end of every loop iteration until 
    * the correct time has passed since the start of the current loop for the desired loop rate in Hz. I have matched 
    * it to the Gyro update frequency.
-   */
-  float invFreq = 1.0/freq*1000000.0;
-  unsigned long checker = micros();
-  
+   */  
   //Sit in loop until appropriate time has passed
-  while (invFreq > (checker - current_time)) {
-    checker = micros();
-  }
-}
-
-void loopBlink() {
-  //DESCRIPTION: Blink LED on board to indicate main loop is running
-
-  if (current_time - blink_counter > blink_delay) {
-    blink_counter = micros();
-    digitalWrite(LED_BUILTIN, blinkAlternate);
-
-    if (blinkAlternate == 1) {
-      blinkAlternate = 0;
-      blink_delay = 100000;
-    }
-    else if (blinkAlternate == 0) {
-      blinkAlternate = 1;
-      blink_delay = 2000000;
-    }
-  }
+  while (invFreq > (micros() - current_time)) ;
 }
 
 void printRadioData() {
@@ -883,7 +885,7 @@ void printAccelData() {
   }
 }
 void printJSON(){
-  if (current_time - print_counter > 10000) {
+  if (current_time - print_counter > 25000) { //Don't go too fast or it slows down the main loop
     print_counter = micros();
     Serial.print(F("{\"roll\": "));
     Serial.print(roll_IMU);
@@ -891,7 +893,20 @@ void printJSON(){
     Serial.print(pitch_IMU);
     Serial.print(F(", \"yaw\": "));
     Serial.print(yaw_IMU);
+    Serial.print(F(", \"ErrorRoll\": "));
+    Serial.print(error_roll);
+    Serial.print(F(", \"IntegralRoll\": "));
+    Serial.print(integral_roll);
+    Serial.print(F(", \"DerivativeRoll\": "));
+    Serial.print(derivative_roll);
     
+    Serial.print(F(", \"RollKp\": "));
+    Serial.print(Kp_roll_angle);
+    Serial.print(F(", \"RollKi\": "));
+    Serial.print(Ki_roll_angle);
+    Serial.print(F(", \"RollKd\": "));
+    Serial.print(Kd_roll_angle);
+
     Serial.print(F(", \"m1\": "));
     Serial.print(m1_command_PWM);
     Serial.print(F(", \"m2\": "));
@@ -914,6 +929,12 @@ void printJSON(){
     Serial.print(GyroY);
     Serial.print(F(", \"GyroZ\": "));
     Serial.print(GyroZ);
+    Serial.print(F(", \"RollIMU\": "));
+    Serial.print(roll_IMU);
+    Serial.print(F(", \"PitchIMU\": "));
+    Serial.print(pitch_IMU);
+    Serial.print(F(", \"YawIMU\": "));
+    Serial.print(yaw_IMU);
 
     Serial.print(F(", \"ThroDes\": "));
     Serial.print(thro_des);
@@ -923,6 +944,12 @@ void printJSON(){
     Serial.print(pitch_des);
     Serial.print(F(", \"YawDes\": "));
     Serial.print(yaw_des);
+    Serial.print(F(", \"Pitch_PID\": "));
+    Serial.print(pitch_PID);
+    Serial.print(F(", \"Roll_PID\": "));
+    Serial.print(roll_PID);
+    Serial.print(F(", \"Yaw_PID\": "));
+    Serial.print(yaw_PID);
 
     Serial.print(F(", \"PWM_throttle\": "));
     Serial.print(PWM_throttle);
@@ -934,14 +961,18 @@ void printJSON(){
     Serial.print(PWM_Rudd);
     Serial.print(F(", \"PWM_ThrottleCutSwitch\": "));
     Serial.print(PWM_ThrottleCutSwitch);
+    Serial.print(F(", \"Throttle_is_Cut\": "));
+    Serial.print(throttle_is_cut);
 
     Serial.print(F(", \"Failsafe\": "));
     Serial.print(failsafed);
-
-
+    
+    Serial.print(F(", \"DeltaTime\": "));
+    Serial.print(deltaTime*1000000.0);
     Serial.println("}");
   }
 }
+
 void printRollPitchYaw() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
@@ -1040,51 +1071,47 @@ unsigned long getRadioPWM(int ch_num) {
 //INTERRUPT SERVICE ROUTINES (for reading PWM and PPM)
 
 void getCh1() {
-  int trigger = digitalRead(throttlePin);
-  if(trigger == 1) {
+  if(digitalRead(throttlePin) == 1) {
     rising_edge_start_1 = micros();
   }
-  else if(trigger == 0) {
+  else {
     channel_1_raw = micros() - rising_edge_start_1;
   }
 }
 
 void getCh2() {
-  int trigger = digitalRead(rollPin);
-  if(trigger == 1) {
+  if(digitalRead(rollPin) == 1) {
     rising_edge_start_2 = micros();
   }
-  else if(trigger == 0) {
+  else {
     channel_2_raw = micros() - rising_edge_start_2;
   }
 }
 
 void getCh3() {
-  int trigger = digitalRead(upDownPin);
-  if(trigger == 1) {
+  if(digitalRead(upDownPin) == 1) {
     rising_edge_start_3 = micros();
   }
-  else if(trigger == 0) {
+  else {
     channel_3_raw = micros() - rising_edge_start_3;
   }
 }
 
 void getCh4() {
-  int trigger = digitalRead(ruddPin);
-  if(trigger == 1) {
+  //PIOB->PIO_PDSR & PIO_PDSR_P27;
+  if(digitalRead(ruddPin) == 1) {
     rising_edge_start_4 = micros();
   }
-  else if(trigger == 0) {
+  else {
     channel_4_raw = micros() - rising_edge_start_4;
   }
 }
 
 void getCh5() {
-  int trigger = digitalRead(throttleCutSwitchPin);
-  if(trigger == 1) {
+  if(digitalRead(throttleCutSwitchPin) == 1) {
     rising_edge_start_5 = micros();
   }
-  else if(trigger == 0) {
+  else {
     channel_5_raw = micros() - rising_edge_start_5;
   }
 }
