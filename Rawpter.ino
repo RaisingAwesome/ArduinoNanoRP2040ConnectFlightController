@@ -15,8 +15,9 @@
 //EASYCHAIR is used to put in some key dummy variables so you can sit in the easy chair with just the Arduino on a cord wiggling it around and seeing how it responds.
 //Set EASYCHAIR to false when you are wanting to install it in the drone.
 #define EASYCHAIR false
-
-//The LOOP_TIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.
+//UPONLYMODE is used to take the radio out of it other than thrust.  The intent is to get it tuned so it can at least take off.  Should be false once tuned.
+#define UPONLYMODE false
+//The LOOP_TIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.  So, the loop time is set a little longer so the IMU has time to update from the control change.
 #define LOOP_TIMING 100
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
@@ -26,7 +27,7 @@ int batteryVoltage=1023; //just a default for the battery monitoring routine
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
 //These are for it to stay stable and descend safely versus totally cutting throttle and drop like a rock.
 unsigned long PWM_throttle_zero = 1000; //used when we want to take throttle to zero.  Failsafe is something higher as it is expected that failsafe is a value needed to safely land.
-unsigned long PWM_throttle_fs = 1100; //throttle  will allow it to descend to the ground if you adjust the throttlecutswitch_fs to 2000
+unsigned long PWM_throttle_fs = 1000; //throttle  will allow it to descend to the ground if you adjust the throttlecutswitch_fs to 2000
 unsigned long PWM_roll_fs = 1500; //ail pretty much in the middle so it quits turning
 unsigned long PWM_elevation_fs = 1500; //elev
 unsigned long PWM_rudd_fs = 1500; //rudd
@@ -44,17 +45,17 @@ float GyroErrorZ = -0.05;
 float Gyro_filter = 0.14;
 
 //Controller parameters (take note of defaults before modifying!): 
-float i_limit = 25.0;     //Integrator saturation level, mostly for safety (default 25.0)
+float i_limit = 100.0;     //Integrator saturation level, mostly for safety (default 25.0)
 float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxYaw = 160.0;     //Max yaw rate in deg/sec (default 160.0)
 
-float Kp_roll_angle = 0.8;    //Roll P-gain - angle mode default .2
-float Ki_roll_angle = 0.3;    //Roll I-gain - angle mode default .3
+float Kp_roll_angle = 0.1;    //Roll P-gain - angle mode default .2
+float Ki_roll_angle = 0.1;    //Roll I-gain - angle mode default .3
 float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode default 0.05
 
-float Kp_pitch_angle = 0.8;   //Pitch P-gain - angle mode default .2
-float Ki_pitch_angle = 0.3;   //Pitch I-gain - angle mode default .3
+float Kp_pitch_angle = 0.1;   //Pitch P-gain - angle mode default .2
+float Ki_pitch_angle = 0.1;   //Pitch I-gain - angle mode default .3
 float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode default .05
 
 float Kp_yaw = 0.3;           //Yaw P-gain default .3
@@ -140,7 +141,7 @@ unsigned long buzzer_millis; unsigned long buzzer_spacing=10000;
 //WiFi Begin
 int keyIndex = 0;
 int status = WL_IDLE_STATUS;
-bool ALLOW_WIFI=false;
+bool ALLOW_WIFI=true;
 
 WiFiServer server(80);
 //WiFi End
@@ -184,16 +185,11 @@ void setupDrone() {
 
   //Initialize radio communication
   radioSetup();
-  PWM_throttle = PWM_throttle_zero;
-  PWM_roll = PWM_roll_fs;
-  PWM_Elevation = PWM_elevation_fs;
-  PWM_Rudd = PWM_rudd_fs;
-  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs;
+  setToFailsafe();
+  PWM_throttle = PWM_throttle_zero; //zero may not necessarily be the failsafe, but on startup we want zero.
   
   //Initialize IMU communication
   IMUinit();
-
-  delay(5);
 
   //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
   //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
@@ -205,24 +201,24 @@ void setupDrone() {
   m3_command_PWM = 0;
   m4_command_PWM = 0;
 
-  while (getRadioPWM(1)>1060&&getRadioPWM(1)<2400&!EASYCHAIR&&getRadioPWM(5)<1300) //wait until the throttle is turned down before allowing anything else to happen.
+  while (getRadioPWM(1)>1060&&getRadioPWM(1)<2400&!EASYCHAIR&&getRadioPWM(5)<1300) //wait until the throttle is turned down and throttlecut switch is not engaged before allowing anything else to happen.
   {
     delay(1000);
   }
-  //calibrateAttitude();
+  //calibrateAttitude(); This is only good if you are sure to start level.
 }
 
 void loopDrone() {
-  getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
+  getIMUdata(); //Pulls raw gyro andaccelerometer data from IMU and applies LP filters to remove noise
   Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
   getDesiredAnglesAndThrottle(); //Convert raw commands to normalized values based on saturated control limits
-  controlANGLE(); //Stabilize on angle setpoint from getDesiredAnglesAndThrottle
+  PIDControlCalcs(); //The PID functions. Stabilize on angle setpoint from getDesiredAnglesAndThrottle
   controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
   scaleCommands(); //Scales motor commands to 0-1
   throttleCut(); //Directly sets motor commands to off based on channel 5 being switched
-  Troubleshooting(); //will do the print routines if uncommented
-  commandMotors(); //Sends command pulses to each motor pin
-  getRadioSticks(); //Gets the PWM from the receiver
+  Troubleshooting(); //will do the print routines that are uncommented
+  commandMotors(); //Sends command pulses to each ESC pin to drive the motors
+  getRadioSticks(); //Gets the PWM from the radio receiver
   failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
 }
 
@@ -283,7 +279,7 @@ void Troubleshooting() {
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
     //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
     //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations and less the Gyro/Acc update speed.  Set by LOOP_TIMING)
-    if (EASYCHAIR) printJSON();
+    printJSON();
   }
 
 
@@ -319,7 +315,7 @@ void setupWiFi()
   }
 
   // wait 1 seconds for connection:
-  delay(1000);
+  delay(3000);
 
   // start the web server on port 80
   server.begin();
@@ -327,25 +323,13 @@ void setupWiFi()
 
 void loopWiFi() {
     // compare the previous status to the current status
-  if (status != WiFi.status()) {
-    // it has changed update the variable
-    status = WiFi.status();
-
-    if (status == WL_AP_CONNECTED) {
-      // a device has connected to the AP
-    } else {
-      // a device has disconnected from the AP, and we are back in listening mode
-    }
-  }
-  
   WiFiClient client = server.available();   // listen for incoming clients
-   if (client) {                             // if you get a client,
+  if (client) {                             // if you get a client,
     String currentLine = "";                // make a String to hold incoming data from the client
     while (client.connected()) {            // loop while the client's connected
       if (client.available()) {             // if there's bytes to read from the client,
         char c = client.read();             // read a byte, then
-        if (c == '\n') {                    // if the byte is a newline character
-
+        if (c == '\n') {                   
           // if the current line is blank, you got two newline characters in a row.
           // that's the end of the client HTTP request, so send a response:
           if (currentLine.length() == 0) {
@@ -356,58 +340,163 @@ void loopWiFi() {
         } else if (c != '\r') {  // if you got anything else but a carriage return character,
           currentLine += c;      // add it to the end of the currentLine
         }
-        if (currentLine.endsWith("GET /One"))
+        if (currentLine.endsWith("GET /?"))
         {
+          setTheValuesFromUserForm(client);
           //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .1 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
-          ALLOW_WIFI=false;
-          Kp_pitch_angle = 0.1; 
-        }
-        else if (currentLine.endsWith("GET /Two"))
-        {
-          //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .2 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
-          ALLOW_WIFI=false;  
-          Kp_pitch_angle = 0.2; 
-        }
-        else if (currentLine.endsWith("GET /Three"))
-        {
-          //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .3 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
-          ALLOW_WIFI=false;             
-          Kp_pitch_angle = 0.3;
-           
-        } 
-        else if (currentLine.endsWith("GET /Four"))
-        {
-          //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .4 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
-          ALLOW_WIFI=false;
-          Kp_pitch_angle = 0.4;          
-        }
-        else if (currentLine.endsWith("GET /Five"))
-        {
-          //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .5 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
-          ALLOW_WIFI=false;
-          Kp_pitch_angle = 0.5;          
-        }
-        else if (currentLine.endsWith("GET /Six"))
-        {
-          //Handle clicking the Begin button
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1><div class='alert alert-success'>Setting drone to .6 pitch constant!</div><br><a href='/' class='btn btn-primary'>Try another</a>");
-          ALLOW_WIFI=false;
-          Kp_pitch_angle = 0.6;          
+          MakeWebPage(client,"<meta http-equiv = \"refresh\" content = \"0; url = http://192.168.2.4 \"/>");
         }
         else if (currentLine.endsWith("GET / HTTP"))
         { //Handle hitting the basic page (1st connection)
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1>Choose a gain constant for pitch to continue.  The higher the gain, the quicker the response to the stick.<br><div class='d-flex justify-content-between flex-wrap'><a href='/One' class='m-2 btn btn-secondary'>K pitch=.1</a><a href='/Two' class='m-2 btn btn-secondary'>K pitch=.2</a><a href='/Three' class='m-2 btn btn-secondary'>K pitch=.3</a><a href='/Four' class='m-2 btn btn-secondary'>K pitch=.4</a><a href='/Five' class='m-2 btn btn-secondary'>K pitch=.5</a><a href='/Six' class='m-2 btn btn-secondary'>K pitch=.6</a></div>");
+          MakeWebPage(client,"<h1>Rawpter V1.0 </h1>" + GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />");
         }
       }
     }
     // close the connection:
     client.stop();
   }
+}
+void setTheValuesFromUserForm(WiFiClient client)
+{
+  String currentLine="";
+  while (client.connected())
+  {            // loop while the client's connected
+    if (client.available()) {             // if there's bytes to read from the client,
+      char c = client.read();             // read a byte, then
+      if (c == '\n') {                   
+        // if the current line is blank, you got two newline characters in a row.
+        // that's the end of the client HTTP request, so send a response:
+        if (currentLine.length() == 0) {
+          break;
+        } else {    // if you got a newline, then clear currentLine:
+          currentLine = "";
+        }
+      } else if (c != '\r') {  // if you got anything else but a carriage return character,
+        currentLine += c;      // add it to the end of the currentLine
+      }
+      if (currentLine.endsWith("kp_roll_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kp_roll_angle=myValue.toFloat();
+      }
+      if (currentLine.endsWith("ki_roll_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Ki_roll_angle=myValue.toFloat();
+      }
+      if (currentLine.endsWith("kd_roll_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kd_roll_angle=myValue.toFloat();
+      }
+    
+      //
+      if (currentLine.endsWith("kp_pitch_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kp_pitch_angle=myValue.toFloat();
+      }
+      if (currentLine.endsWith("ki_pitch_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Ki_pitch_angle=myValue.toFloat();
+      }
+      if (currentLine.endsWith("kd_pitch_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kd_pitch_angle=myValue.toFloat();
+      }
+      //yaw
+      if (currentLine.endsWith("kp_yaw="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kp_yaw=myValue.toFloat();
+      }
+      if (currentLine.endsWith("ki_yaw="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Ki_yaw=myValue.toFloat();
+      }
+      if (currentLine.endsWith("kd_yaw="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kd_yaw=myValue.toFloat();
+          return;
+      }
+    }  
+  }
+}
+String GetParameters()
+{
+  String myString="<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
+  myString=myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=text value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=text value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=text style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
+  myString=myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=text value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=text value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=text  style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
+  myString=myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=text  style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=text name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=text name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'><input type=hidden name=ender value='0'></td></tr>";
+  myString=myString + "</table><br>Tip: To use your parameters beyond this flight session, snapshot the screen for reference and update the code.<br>";
+  return myString;
 }
 
 void MakeWebPage(WiFiClient client, String html)
@@ -425,9 +514,9 @@ void MakeWebPage(WiFiClient client, String html)
   client.print("</head>");
   client.print("<style>");
   client.print("</style>");
-  client.print("<div class='container'>");
+  client.print("<form method=get><div class='container'>");
   client.print(html);
-  client.print("</div>");
+  client.print("</div></form>");
   client.print("<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js\" integrity=\"sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p\" crossorigin=\"anonymous\"></script>");
   client.println(); // The HTTP response ends with another blank line:
 }
@@ -464,19 +553,18 @@ void controlMixer() {
   //m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front right
   //m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
   //m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
-
   m1_command_scaled = thro_des + pitch_PID + roll_PID + yaw_PID; //Front left
   m2_command_scaled = thro_des + pitch_PID - roll_PID - yaw_PID; //Front right
   m3_command_scaled = thro_des - pitch_PID - roll_PID + yaw_PID; //Back Right
   m4_command_scaled = thro_des - pitch_PID + roll_PID - yaw_PID; //Back Left
-
 }
 
 void IMUinit() {
   //DESCRIPTION: Initialize IMU
   if (!IMU.begin()) {  
     while (true) ;
-  }
+  }  
+  delay(15);
 }
 
 void getIMUdata() {
@@ -628,7 +716,7 @@ void getDesiredAnglesAndThrottle() {
   yaw_passthru = constrain(yaw_passthru, -0.5, 0.5);
 }
 
-void controlANGLE() {
+void PIDControlCalcs() {
   //DESCRIPTION: Computes control commands based on state error (angle)
   /*
    * Basic PID control to stablize on angle setpoint based on desired states roll_des, pitch_des, and yaw_des computed in 
@@ -642,6 +730,8 @@ void controlANGLE() {
    */
   
   //Roll
+  if (UPONLYMODE) roll_des=0;
+
   error_roll = roll_des - roll_IMU;
   integral_roll = integral_roll_prev + error_roll*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
@@ -653,6 +743,7 @@ void controlANGLE() {
   roll_PID = 0.01*(Kp_roll_angle*error_roll + Ki_roll_angle*integral_roll - Kd_roll_angle*derivative_roll); //Scaled by .01 to bring within -1 to 1 range
 
   //Pitch
+  if (UPONLYMODE) pitch_des=0;
   error_pitch = pitch_des - pitch_IMU;
   integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
@@ -672,7 +763,8 @@ void controlANGLE() {
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
   derivative_yaw = (error_yaw - error_yaw_prev)/deltaTime; 
   yaw_PID = .01*(Kp_yaw*error_yaw + Ki_yaw*integral_yaw + Kd_yaw*derivative_yaw); //Scaled by .01 to bring within -1 to 1 range
- 
+  
+  if (UPONLYMODE) yaw_PID=0;
   //Update roll variables
   integral_roll_prev = integral_roll;
   //Update pitch variables
@@ -680,6 +772,7 @@ void controlANGLE() {
   //Update yaw variables
   error_yaw_prev = error_yaw;
   integral_yaw_prev = integral_yaw;
+
 }
 
 void scaleCommands() {
@@ -688,10 +781,15 @@ void scaleCommands() {
    * The actual pulse width is set at the servo attach.
    */
   //Constrain commands to motors within Simonk bounds
-  m1_command_PWM = constrain(m1_command_PWM*180, 0, 180);
-  m2_command_PWM = constrain(m2_command_PWM*180, 0, 180);
-  m3_command_PWM = constrain(m3_command_PWM*180, 0, 180);
-  m4_command_PWM = constrain(m4_command_PWM*180, 0, 180);
+  m1_command_PWM = m1_command_scaled*180;
+  m2_command_PWM = m2_command_scaled*180;
+  m3_command_PWM = m3_command_scaled*180;
+  m4_command_PWM = m4_command_scaled*180;
+
+  m1_command_PWM = constrain(m1_command_PWM, 0, 180);
+  m2_command_PWM = constrain(m2_command_PWM, 0, 180);
+  m3_command_PWM = constrain(m3_command_PWM, 0, 180);
+  m4_command_PWM = constrain(m4_command_PWM, 0, 180);
 }
 
 void getRadioSticks() {
@@ -720,6 +818,15 @@ void getRadioSticks() {
   PWM_roll_prev =PWM_roll;
   PWM_Elevation_prev = PWM_Elevation;
   PWM_Rudd_prev = PWM_Rudd;
+  
+}
+void setToFailsafe()
+{
+  PWM_throttle = PWM_throttle_fs;
+  PWM_roll = PWM_roll_fs;
+  PWM_Elevation = PWM_elevation_fs;
+  PWM_Rudd = PWM_rudd_fs;
+  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs; //this is so the throttle cut routine doesn't override the fail safes.
 }
 
 void failSafe() {
@@ -739,14 +846,10 @@ void failSafe() {
   //if (PWM_ThrottleCutSwitch>maxVal || PWM_ThrottleCutSwitch<minVal || PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
   
   
-  if (PWM_throttle > 800 || PWM_throttle < 2200) //this is the less conservative version to get through this routine faster.
+  if (PWM_throttle < 800 || PWM_throttle > 2200) //this is the less conservative version to get through this routine faster.
   {
     failsafed=true;
-    PWM_throttle = PWM_throttle_fs;
-    PWM_roll = PWM_roll_fs;
-    PWM_Elevation = PWM_elevation_fs;
-    PWM_Rudd = PWM_rudd_fs;
-    PWM_ThrottleCutSwitch=PWM_ThrottleCutSwitch_fs; //this is so the throttle cut routine doesn't override the fail safes.
+    setToFailsafe();
   } else failsafed=false;
   
   if (EASYCHAIR) PWM_throttle=1500;//For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
@@ -835,13 +938,13 @@ void printRadioData() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
     Serial.print(F(" CH1: "));
-    Serial.print(PWM_throttle);
+    Serial.print(getRadioPWM(1));
     Serial.print(F(" CH2: "));
-    Serial.print(PWM_roll);
+    Serial.print(getRadioPWM(2));
     Serial.print(F(" CH3: "));
-    Serial.print(PWM_Elevation);
+    Serial.print(getRadioPWM(3));
     Serial.print(F(" CH4: "));
-    Serial.println(PWM_Rudd);
+    Serial.println(getRadioPWM(4));
     Serial.print(F(" CH5: "));
     Serial.print(PWM_ThrottleCutSwitch);
   }
@@ -1071,47 +1174,51 @@ unsigned long getRadioPWM(int ch_num) {
 //INTERRUPT SERVICE ROUTINES (for reading PWM and PPM)
 
 void getCh1() {
-  if(digitalRead(throttlePin) == 1) {
+  int trigger = digitalRead(throttlePin);
+  if(trigger == 1) {
     rising_edge_start_1 = micros();
   }
-  else {
+  else if(trigger == 0) {
     channel_1_raw = micros() - rising_edge_start_1;
   }
 }
 
 void getCh2() {
-  if(digitalRead(rollPin) == 1) {
+  int trigger = digitalRead(rollPin);
+  if(trigger == 1) {
     rising_edge_start_2 = micros();
   }
-  else {
+  else if(trigger == 0) {
     channel_2_raw = micros() - rising_edge_start_2;
   }
 }
 
 void getCh3() {
-  if(digitalRead(upDownPin) == 1) {
+  int trigger = digitalRead(upDownPin);
+  if(trigger == 1) {
     rising_edge_start_3 = micros();
   }
-  else {
+  else if(trigger == 0) {
     channel_3_raw = micros() - rising_edge_start_3;
   }
 }
 
 void getCh4() {
-  //PIOB->PIO_PDSR & PIO_PDSR_P27;
-  if(digitalRead(ruddPin) == 1) {
+  int trigger = digitalRead(ruddPin);
+  if(trigger == 1) {
     rising_edge_start_4 = micros();
   }
-  else {
+  else if(trigger == 0) {
     channel_4_raw = micros() - rising_edge_start_4;
   }
 }
 
 void getCh5() {
-  if(digitalRead(throttleCutSwitchPin) == 1) {
+  int trigger = digitalRead(throttleCutSwitchPin);
+  if(trigger == 1) {
     rising_edge_start_5 = micros();
   }
-  else {
+  else if(trigger == 0) {
     channel_5_raw = micros() - rising_edge_start_5;
   }
 }
