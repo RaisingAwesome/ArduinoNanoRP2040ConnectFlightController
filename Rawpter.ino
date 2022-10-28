@@ -1,13 +1,13 @@
-//Rawpter 1.0 by Sean J. Miller
+//Rawpter 1.01 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
 //Go to https://raisingawesome.site/projects for more info
 //MIT License - use for any purpose you want
 
 #include <SPI.h>
 #include <WiFiNINA.h> //WiFi
-#include <Arduino_LSM6DSOX.h> //IMU
-#include <Servo.h>
-#include <MadgwickAHRS.h>
+#include <Arduino_LSM6DSOX.h> //IMU get from the Arduino IDE Library Manager
+#include <Servo.h> //get from the Arduino IDE Library Manager
+#include <MadgwickAHRS.h> //get from the Arduino IDE Library Manager
 
 //========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
@@ -22,7 +22,7 @@
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
 #define BATTERYTYPE 14.8
-int batteryVoltage=1023; //just a default for the battery monitoring routine 
+int batteryVoltage=1023; //just a default for the battery monitoring routine
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
 //These are for it to stay stable and descend safely versus totally cutting throttle and drop like a rock.
@@ -45,22 +45,23 @@ float GyroErrorZ = -0.05;
 float Gyro_filter = 0.14;
 
 //Controller parameters (take note of defaults before modifying!): 
-float i_limit = 100.0;     //Integrator saturation level, mostly for safety (default 25.0)
+float i_limit = 200.0;     //Integrator saturation level, mostly for safety (default 25.0)
 float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxYaw = 160.0;     //Max yaw rate in deg/sec (default 160.0)
+float maxMotor=1.0;
 
-float Kp_roll_angle = 0.1;    //Roll P-gain - angle mode default .2
-float Ki_roll_angle = 0.1;    //Roll I-gain - angle mode default .3
-float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode default 0.05
+float Kp_roll_angle = 0.05;    //Roll P-gain - angle mode default .2
+float Ki_roll_angle = 0.06;    //Roll I-gain - angle mode default .3
+float Kd_roll_angle = 0.01;   //Roll D-gain - angle mode default 0.05
 
-float Kp_pitch_angle = 0.1;   //Pitch P-gain - angle mode default .2
-float Ki_pitch_angle = 0.1;   //Pitch I-gain - angle mode default .3
-float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode default .05
+float Kp_pitch_angle = 0.05;   //Pitch P-gain - angle mode default .2
+float Ki_pitch_angle = 0.06;   //Pitch I-gain - angle mode default .3
+float Kd_pitch_angle = 0.01;  //Pitch D-gain - angle mode default .05
 
-float Kp_yaw = 0.3;           //Yaw P-gain default .3
-float Ki_yaw = 0.05;          //Yaw I-gain default .05
-float Kd_yaw = 0.00015;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
+float Kp_yaw = 0.0;           //Yaw P-gain default .3
+float Ki_yaw = 0.00;          //Yaw I-gain default .05
+float Kd_yaw = 0.0000;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
 
 //========================================================================================================================//
 //                                                     DECLARE PINS                                                       //                           
@@ -166,7 +167,7 @@ void loop() {
   
   if (ALLOW_WIFI) loopWiFi();
   loopDrone();
-  tock(LOOP_TIMING);
+  tock();
 }
 
 void setupDrone() {  
@@ -194,7 +195,7 @@ void setupDrone() {
   //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
   //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
 
-  if (getRadioPWM(1)>1800&&getRadioPWM(1)<2400&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate before going into the loop
+  if (getRadioPWM(1)>1800&&getRadioPWM(1)<2400&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate ESCs before going into the loop
   
   m1_command_PWM = 0; //Will send the default for motor stopped for Simonk firmware
   m2_command_PWM = 0;
@@ -386,6 +387,30 @@ void setTheValuesFromUserForm(WiFiClient client)
           }
           Kp_roll_angle=myValue.toFloat();
       }
+      if (currentLine.endsWith("maxMotor="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          maxMotor=myValue.toFloat();          
+      }
+      if (currentLine.endsWith("i_limit="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          i_limit=myValue.toFloat();
+      }
       if (currentLine.endsWith("ki_roll_angle="))
       {
           String myValue="";
@@ -486,15 +511,19 @@ void setTheValuesFromUserForm(WiFiClient client)
           Kd_yaw=myValue.toFloat();
           return;
       }
+
     }  
   }
 }
 String GetParameters()
 {
-  String myString="<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
+  String myString;
+  myString=myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=text name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
+  myString=myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=text name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr></table>";
+  myString=myString + "<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
   myString=myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=text value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=text value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=text style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
   myString=myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=text value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=text value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=text  style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
-  myString=myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=text  style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=text name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=text name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'><input type=hidden name=ender value='0'></td></tr>";
+  myString=myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=text  style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=text name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=text name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'></td></tr><input type=hidden name=ender value='0'>";
   myString=myString + "</table><br>Tip: To use your parameters beyond this flight session, snapshot the screen for reference and update the code.<br>";
   return myString;
 }
@@ -516,6 +545,7 @@ void MakeWebPage(WiFiClient client, String html)
   client.print("</style>");
   client.print("<form method=get><div class='container'>");
   client.print(html);
+  client.print(tuningProcedure());
   client.print("</div></form>");
   client.print("<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js\" integrity=\"sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p\" crossorigin=\"anonymous\"></script>");
   client.println(); // The HTTP response ends with another blank line:
@@ -557,6 +587,12 @@ void controlMixer() {
   m2_command_scaled = thro_des + pitch_PID - roll_PID - yaw_PID; //Front right
   m3_command_scaled = thro_des - pitch_PID - roll_PID + yaw_PID; //Back Right
   m4_command_scaled = thro_des - pitch_PID + roll_PID - yaw_PID; //Back Left
+
+  m1_command_scaled=constrain(m1_command_scaled,0,maxMotor);
+  m2_command_scaled=constrain(m2_command_scaled,0,maxMotor);
+  m3_command_scaled=constrain(m3_command_scaled,0,maxMotor);
+  m4_command_scaled=constrain(m4_command_scaled,0,maxMotor);
+
 }
 
 void IMUinit() {
@@ -675,7 +711,7 @@ void calibrateAttitude() {
     tick();
     getIMUdata();
     Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ);
-    tock(LOOP_TIMING); //gyro update frequency
+    tock();
   }
 }
 void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
@@ -734,7 +770,7 @@ void PIDControlCalcs() {
 
   error_roll = roll_des - roll_IMU;
   integral_roll = integral_roll_prev + error_roll*deltaTime;
-  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1300) {   //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
 
@@ -745,19 +781,30 @@ void PIDControlCalcs() {
   //Pitch
   if (UPONLYMODE) pitch_des=0;
   error_pitch = pitch_des - pitch_IMU;
-  integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
-  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
+
+  bool allow_integral=true;
+  if (error_pitch>0&&m1_command_scaled==maxMotor)
+  {
+    allow_integral=false;
+  } else if (error_pitch<0&&m1_command_scaled==0)
+  {
+    allow_integral=false;
+  }
+
+  if (allow_integral) integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
+  if (PWM_throttle < 1300) {   //Don't let integrator build if throttle is too low
     integral_pitch = 0;
   }
   
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
   derivative_pitch = GyroY;
-  pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
 
+  pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
+  
   //Yaw, stablize on rate from GyroZ versus angle.  In other words, your stick is setting y axis rotation speed - not the angle to get to.
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw*deltaTime;
-  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1300) {   //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -772,7 +819,6 @@ void PIDControlCalcs() {
   //Update yaw variables
   error_yaw_prev = error_yaw;
   integral_yaw_prev = integral_yaw;
-
 }
 
 void scaleCommands() {
@@ -780,7 +826,7 @@ void scaleCommands() {
   /*
    * The actual pulse width is set at the servo attach.
    */
-  //Constrain commands to motors within Simonk bounds
+  //Constrain commands to motors within PWM 0-180 degrees for Servo PWM.
   m1_command_PWM = m1_command_scaled*180;
   m2_command_PWM = m2_command_scaled*180;
   m3_command_PWM = m3_command_scaled*180;
@@ -807,7 +853,7 @@ void getRadioSticks() {
     PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
-  float b = 0.7; //Lower=slower, higher=noiser default 0.7
+  float b = 0.4; //0.1-1 Lower=slower, higher=noiser default 0.7
 
   PWM_throttle = (1.0 - b)*PWM_throttle_prev + b*PWM_throttle;
   PWM_roll = (1.0 - b)*PWM_roll_prev + b*PWM_roll;
@@ -922,16 +968,18 @@ void killMotors(){
     m4_command_PWM = 0;
 }
 
-void tock(int freq) {
+void tock() {
   //DESCRIPTION: Regulate main loop rate to specified frequency in Hz
   /*
    * It's good to operate at a constant loop rate for filters to remain stable and whatnot. Interrupt routines running in the
    * background cause the loop rate to fluctuate. This function basically just waits at the end of every loop iteration until 
    * the correct time has passed since the start of the current loop for the desired loop rate in Hz. I have matched 
-   * it to the Gyro update frequency.
+   * it just below the Gyro update frequency.  invFreq is set at the top of the code.
    */  
-  //Sit in loop until appropriate time has passed
-  while (invFreq > (micros() - current_time)) ;
+  //Sit in loop until appropriate time has passed while checking for any WiFi client activity.
+  while (invFreq > (micros() - current_time)) {
+    if (ALLOW_WIFI) loopWiFi();
+  };
 }
 
 void printRadioData() {
@@ -1221,4 +1269,9 @@ void getCh5() {
   else if(trigger == 0) {
     channel_5_raw = micros() - rising_edge_start_5;
   }
+}
+
+String tuningProcedure()
+{
+  return "<hr><h3><b>Ziegler-Nichols</b></h3>  <p>The Ziegler-Nichols tuning method is one of the most famous ways to experimentally tune a PID controller. The basic algorithm is as follows:</p><ol><li>Turn off the Integral and Derivative components for the controller; only use Proportional control.</li><li>Slowly increase the gain (i.e. <em>K<sub>p</sub></em>, the Proportion constant) until the process starts to oscillate<br />This final gain value is known as the ultimate gain, or <em>K<sub>u</sub></em><br />The period of oscillation is the ultimate period, or <em>T<sub>u</sub></em></li><li>Use the following table to derive the PID variables</li></ol></div></div><div class=\"sqs-block code-block sqs-block-code\" data-block-type=\"23\" id=\"block-yui_3_17_2_1_1598301478634_207710\"><div class=\"sqs-block-content\"><style type=\"text/css\">.tg  {border-collapse:collapse;border-spacing:0;}.tg td{border-color:black;border-style:solid;border-width:1px;  overflow:hidden;padding:10px 5px;word-break:normal;}.tg th{border-color:black;border-style:solid;border-width:1px;  font-weight:normal;overflow:hidden;padding:10px 5px;word-break:normal;}.tg .tg-gr1d{background-color:#e9f4fc;border-color:#337494;font-weight:bold;text-align:left;vertical-align:top}.tg .tg-m4ds{border-color:#337494;text-align:center;vertical-align:top}.tg .tg-bxxa{border-color:#337494;text-align:left;vertical-align:top}.tg .tg-hk19{background-color:#e9f4fc;border-color:#337494;font-weight:bold;text-align:center;vertical-align:top}.tg .tg-vaq8{background-color:#e9f4fc;border-color:#337494;text-align:left;vertical-align:top}.tg .tg-e1cu{background-color:#e9f4fc;border-color:#337494;text-align:center;vertical-align:top}</style><table class=\"table\"><thead>  <tr>    <th class=\"tg-gr1d\">Controller</th>    <th class=\"tg-hk19\">K<sub>p</sub></th>    <th class=\"tg-hk19\">T<sub>i</sub></th>    <th class=\"tg-hk19\">T<sub>d</sub></th>  </tr></thead><tbody>  <tr>    <td class=\"tg-bxxa\">P</td>    <td class=\"tg-m4ds\">K<sub>u</sub>/2</td>    <td class=\"tg-m4ds\"></td>    <td class=\"tg-m4ds\"></td>  </tr>  <tr>    <td class=\"tg-vaq8\">PI</td>    <td class=\"tg-e1cu\">K<sub>u</sub>/2.5</td>    <td class=\"tg-e1cu\">T<sub>u</sub>/1.25</td>    <td class=\"tg-e1cu\"></td>  </tr>  <tr>    <td class=\"tg-bxxa\">PID</td>    <td class=\"tg-m4ds\">0.6K<sub>u</sub></td>    <td class=\"tg-m4ds\">T<sub>u</sub>/2</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/8</td>  </tr>  <tr>    <td class=\"tg-vaq8\">Pessen Integral Rule<br></td>    <td class=\"tg-e1cu\">0.7K<sub>u</sub></td>    <td class=\"tg-e1cu\">0.4T<sub>u</sub></td>    <td class=\"tg-e1cu\">0.15T<sub>u</sub></td>  </tr>  <tr>    <td class=\"tg-bxxa\">Moderate overshoot</td>    <td class=\"tg-m4ds\">K<sub>u</sub>/3</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/2</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/3</td>  </tr>  <tr>    <td class=\"tg-vaq8\">No overshoot</td>    <td class=\"tg-e1cu\">K<sub>u</sub>/5</td>    <td class=\"tg-e1cu\">T<sub>u</sub>/2</td>    <tdclass=\"tg-e1cu\">T<sub>u</sub>/3</td>  </tr></tbody></table>";
 }
