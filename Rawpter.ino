@@ -1,4 +1,4 @@
-//Rawpter 1.01 by Sean J. Miller
+//Rawpter 1.2 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
 //Go to https://raisingawesome.site/projects for more info
 //MIT License - use for any purpose you want
@@ -7,7 +7,6 @@
 #include <WiFiNINA.h> //WiFi
 #include <Arduino_LSM6DSOX.h> //IMU get from the Arduino IDE Library Manager
 #include <Servo.h> //get from the Arduino IDE Library Manager
-#include <MadgwickAHRS.h> //get from the Arduino IDE Library Manager
 
 //========================================================================================================================//
 //                                               USER-SPECIFIED VARIABLES                                                 //                           
@@ -15,8 +14,7 @@
 //EASYCHAIR is used to put in some key dummy variables so you can sit in the easy chair with just the Arduino on a cord wiggling it around and seeing how it responds.
 //Set EASYCHAIR to false when you are wanting to install it in the drone.
 #define EASYCHAIR false
-//UPONLYMODE is used to take the radio out of it other than thrust.  The intent is to get it tuned so it can at least take off.  Should be false once tuned.
-#define UPONLYMODE false
+
 //The LOOP_TIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.  So, the loop time is set a little longer so the IMU has time to update from the control change.
 #define LOOP_TIMING 100
 
@@ -32,36 +30,43 @@ unsigned long PWM_roll_fs = 1500; //ail pretty much in the middle so it quits tu
 unsigned long PWM_elevation_fs = 1500; //elev
 unsigned long PWM_rudd_fs = 1500; //rudd
 unsigned long PWM_ThrottleCutSwitch_fs = 1000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
+bool UPONLYMODE=false; //UPONLYMODE is used to take the radio out of it other than thrust.  The intent is to get it tuned so it can at least take off.  Should be false once tuned.
 
 bool failsafed=false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
 float AccErrorX = 0.01;
 float AccErrorY = -0.01;
 float AccErrorZ = 0.01;
-float Accel_filter=0.14;
+float Accel_filter=0.95;
 float GyroErrorX = 0.42;
 float GyroErrorY= 0.07;
 float GyroErrorZ = -0.05;
-float Gyro_filter = 0.14;
+float Gyro_filter = 0.95;
+
+float B_madgwick = 0.02; //(default 0.04)
+float q0 = 1.0f; //Initialize quaternion for madgwick filter
+float q1 = 0.0f;
+float q2 = 0.0f;
+float q3 = 0.0f;
 
 //Controller parameters (take note of defaults before modifying!): 
-float i_limit = 200.0;     //Integrator saturation level, mostly for safety (default 25.0)
-float maxRoll = 30.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
-float maxPitch = 30.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float i_limit = 300.0;     //Integrator saturation level, mostly for safety (default 25.0)
+float maxRoll = 15.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxPitch = 15.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxYaw = 160.0;     //Max yaw rate in deg/sec (default 160.0)
-float maxMotor=1.0;
+float maxMotor=0.5;
+float minThrottle=0.8; //this minimum percentage of throttle to allow a PID to subtract.  Prevents from stopping a prop.
+float Kp_roll_angle = 0.2;    //Roll P-gain - angle mode default .2
+float Ki_roll_angle = 0.3;    //Roll I-gain - angle mode default .3
+float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode default 0.05
 
-float Kp_roll_angle = 0.05;    //Roll P-gain - angle mode default .2
-float Ki_roll_angle = 0.06;    //Roll I-gain - angle mode default .3
-float Kd_roll_angle = 0.01;   //Roll D-gain - angle mode default 0.05
+float Kp_pitch_angle = 0.2;   //Pitch P-gain - angle mode default .2
+float Ki_pitch_angle = 0.3;   //Pitch I-gain - angle mode default .3
+float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode default .05
 
-float Kp_pitch_angle = 0.05;   //Pitch P-gain - angle mode default .2
-float Ki_pitch_angle = 0.06;   //Pitch I-gain - angle mode default .3
-float Kd_pitch_angle = 0.01;  //Pitch D-gain - angle mode default .05
-
-float Kp_yaw = 0.0;           //Yaw P-gain default .3
+float Kp_yaw = 0.00;           //Yaw P-gain default .3
 float Ki_yaw = 0.00;          //Yaw I-gain default .05
-float Kd_yaw = 0.0000;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
+float Kd_yaw = 0.00;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
 
 //========================================================================================================================//
 //                                                     DECLARE PINS                                                       //                           
@@ -117,7 +122,7 @@ unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwi
 unsigned long PWM_throttle_prev,PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
 
 //IMU:
-Madgwick IMU_Data; //the library tool that will convert the IMU data to angular data
+
 float AccX, AccY, AccZ;
 float AccX_prev, AccY_prev, AccZ_prev;
 float GyroX, GyroY, GyroZ;
@@ -153,7 +158,6 @@ WiFiServer server(80);
 
 void setup() {
   //Bootup operations 
-  IMU_Data.begin(LOOP_TIMING); //initiate the calculations to determine the drone attitude angles
   setupSerial();
   setupBatteryMonitor();
   setupDrone();
@@ -291,7 +295,7 @@ void setupSerial(){
 
 void setupWiFi()
 {
-  char ssid[] = "Rawpter";        
+  char ssid[] = "0Rawpter";        
   char pass[] = "12345678";    
 
   // check for the WiFi module:
@@ -349,7 +353,7 @@ void loopWiFi() {
         }
         else if (currentLine.endsWith("GET / HTTP"))
         { //Handle hitting the basic page (1st connection)
-          MakeWebPage(client,"<h1>Rawpter V1.0 </h1>" + GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />");
+          MakeWebPage(client,"<h1>Rawpter V1.0 <small>by Raising Awesome</small></h1>" + GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />");
         }
       }
     }
@@ -359,7 +363,7 @@ void loopWiFi() {
 }
 void setTheValuesFromUserForm(WiFiClient client)
 {
-  String currentLine="";
+  String currentLine=""; UPONLYMODE=false;
   while (client.connected())
   {            // loop while the client's connected
     if (client.available()) {             // if there's bytes to read from the client,
@@ -375,18 +379,6 @@ void setTheValuesFromUserForm(WiFiClient client)
       } else if (c != '\r') {  // if you got anything else but a carriage return character,
         currentLine += c;      // add it to the end of the currentLine
       }
-      if (currentLine.endsWith("kp_roll_angle="))
-      {
-          String myValue="";
-
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kp_roll_angle=myValue.toFloat();
-      }
       if (currentLine.endsWith("maxMotor="))
       {
           String myValue="";
@@ -399,6 +391,19 @@ void setTheValuesFromUserForm(WiFiClient client)
           }
           maxMotor=myValue.toFloat();          
       }
+      if (currentLine.endsWith("minThrottle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          minThrottle=myValue.toFloat();          
+      }
+
       if (currentLine.endsWith("i_limit="))
       {
           String myValue="";
@@ -411,6 +416,57 @@ void setTheValuesFromUserForm(WiFiClient client)
           }
           i_limit=myValue.toFloat();
       }
+      if (currentLine.endsWith("Accel_filter="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Accel_filter=myValue.toFloat();
+      }
+      if (currentLine.endsWith("Gyro_filter="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Gyro_filter=myValue.toFloat();
+      }
+
+      if (currentLine.endsWith("UPONLYMODE="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          if (myValue=="true") UPONLYMODE=true; else UPONLYMODE=false;
+      }      
+
+      if (currentLine.endsWith("kp_roll_angle="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          Kp_roll_angle=myValue.toFloat();
+      }
+
       if (currentLine.endsWith("ki_roll_angle="))
       {
           String myValue="";
@@ -515,11 +571,19 @@ void setTheValuesFromUserForm(WiFiClient client)
     }  
   }
 }
+
 String GetParameters()
 {
   String myString;
   myString=myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=text name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
-  myString=myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=text name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr></table>";
+  myString=myString + "<tr><td>Min Throttle Reduction (0.0-1.0):</td><td><input type=text name=minThrottle style='width:70px;' value='" + String(minThrottle) + "'></td></tr>";
+  myString=myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=text name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr>";
+  myString=myString + "<tr><td>Accel Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=text name=Accel_filter style='width:70px;' value='" + String(Accel_filter) + "'></td></tr>";
+  myString=myString + "<tr><td>Gyro Dampening (0.1-1.0 ):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=text name=Gyro_filter style='width:70px;' value='" + String(Gyro_filter) + "'></td></tr>";
+  String myVal;
+  if (!UPONLYMODE) myVal=""; else myVal="checked";
+  myString=myString + "<tr><td>Up Mode Only:</td><td><input type=CHECKBOX name=UPONLYMODE value='true' " + (myVal) + "></td></tr>";
+  myString=myString + "</table>";
   myString=myString + "<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
   myString=myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=text value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=text value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=text style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
   myString=myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=text value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=text value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=text  style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
@@ -587,11 +651,13 @@ void controlMixer() {
   m2_command_scaled = thro_des + pitch_PID - roll_PID - yaw_PID; //Front right
   m3_command_scaled = thro_des - pitch_PID - roll_PID + yaw_PID; //Back Right
   m4_command_scaled = thro_des - pitch_PID + roll_PID - yaw_PID; //Back Left
+  
+  float minimum=thro_des*minThrottle;
 
-  m1_command_scaled=constrain(m1_command_scaled,0,maxMotor);
-  m2_command_scaled=constrain(m2_command_scaled,0,maxMotor);
-  m3_command_scaled=constrain(m3_command_scaled,0,maxMotor);
-  m4_command_scaled=constrain(m4_command_scaled,0,maxMotor);
+  m1_command_scaled=constrain(m1_command_scaled,minimum,maxMotor);
+  m2_command_scaled=constrain(m2_command_scaled,minimum,maxMotor);
+  m3_command_scaled=constrain(m3_command_scaled,minimum,maxMotor);
+  m4_command_scaled=constrain(m4_command_scaled,minimum,maxMotor);
 
 }
 
@@ -716,13 +782,86 @@ void calibrateAttitude() {
 }
 void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
 {
-      // update the filter, which computes orientation
-    IMU_Data.updateIMU(gx, gy, gz, ax, ay, az);
+ //DESCRIPTION: Attitude estimation through sensor fusion - 6DOF
+  /*
+   * See description of Madgwick() for more information. This is a 6DOF implimentation for when magnetometer data is not
+   * available (for example when using the recommended MPU6050 IMU for the default setup).
+   */
+  float recipNorm;
+  float s0, s1, s2, s3;
+  float qDot1, qDot2, qDot3, qDot4;
+  float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2 ,_8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
 
-    // print the heading, pitch and roll
-    roll_IMU = IMU_Data.getRoll();
-    pitch_IMU = IMU_Data.getPitch();
-    yaw_IMU = IMU_Data.getYaw();
+  //Convert gyroscope degrees/sec to radians/sec
+  gx *= 0.0174533f;
+  gy *= 0.0174533f;
+  gz *= 0.0174533f;
+
+  //Rate of change of quaternion from gyroscope
+  qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
+  qDot2 = 0.5f * (q0 * gx + q2 * gz - q3 * gy);
+  qDot3 = 0.5f * (q0 * gy - q1 * gz + q3 * gx);
+  qDot4 = 0.5f * (q0 * gz + q1 * gy - q2 * gx);
+
+  //Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
+  if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
+    //Normalise accelerometer measurement
+    recipNorm = invSqrt(ax * ax + ay * ay + az * az);
+    ax *= recipNorm;
+    ay *= recipNorm;
+    az *= recipNorm;
+
+    //Auxiliary variables to avoid repeated arithmetic
+    _2q0 = 2.0f * q0;
+    _2q1 = 2.0f * q1;
+    _2q2 = 2.0f * q2;
+    _2q3 = 2.0f * q3;
+    _4q0 = 4.0f * q0;
+    _4q1 = 4.0f * q1;
+    _4q2 = 4.0f * q2;
+    _8q1 = 8.0f * q1;
+    _8q2 = 8.0f * q2;
+    q0q0 = q0 * q0;
+    q1q1 = q1 * q1;
+    q2q2 = q2 * q2;
+    q3q3 = q3 * q3;
+
+    //Gradient decent algorithm corrective step
+    s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
+    s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
+    s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
+    s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
+    recipNorm = invSqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3); //normalise step magnitude
+    s0 *= recipNorm;
+    s1 *= recipNorm;
+    s2 *= recipNorm;
+    s3 *= recipNorm;
+
+    //Apply feedback step
+    qDot1 -= B_madgwick * s0;
+    qDot2 -= B_madgwick * s1;
+    qDot3 -= B_madgwick * s2;
+    qDot4 -= B_madgwick * s3;
+  }
+
+  //Integrate rate of change of quaternion to yield quaternion
+  
+  q0 += qDot1 * deltaTime;
+  q1 += qDot2 * deltaTime;
+  q2 += qDot3 * deltaTime;
+  q3 += qDot4 * deltaTime;
+
+  //Normalise quaternion
+  recipNorm = invSqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+  q0 *= recipNorm;
+  q1 *= recipNorm;
+  q2 *= recipNorm;
+  q3 *= recipNorm;
+
+  //Compute angles
+  roll_IMU = atan2(q0*q1 + q2*q3, 0.5f - q1*q1 - q2*q2)*57.29577951; //degrees
+  pitch_IMU = -asin(-2.0f * (q1*q3 - q0*q2))*57.29577951; //degrees
+  yaw_IMU = -atan2(q1*q2 + q0*q3, 0.5f - q2*q2 - q3*q3)*57.29577951; //degrees
 }
 
 void getDesiredAnglesAndThrottle() {
@@ -767,10 +906,13 @@ void PIDControlCalcs() {
   
   //Roll
   if (UPONLYMODE) roll_des=0;
+  if (throttle_is_cut) {
+    integral_roll=0; integral_pitch=0; integral_yaw=0;
+  }
 
   error_roll = roll_des - roll_IMU;
   integral_roll = integral_roll_prev + error_roll*deltaTime;
-  if (PWM_throttle < 1300) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
 
@@ -780,23 +922,29 @@ void PIDControlCalcs() {
 
   //Pitch
   if (UPONLYMODE) pitch_des=0;
+  pitch_des=0;
   error_pitch = pitch_des - pitch_IMU;
 
   bool allow_integral=true;
-  if (error_pitch>0&&m1_command_scaled==maxMotor)
+
+  //prevent pitch saturation
+  /*
+  if (error_pitch>0&&m1_command_scaled==maxMotor||m4_command_scaled==0)
   {
     allow_integral=false;
-  } else if (error_pitch<0&&m1_command_scaled==0)
+  } else if (error_pitch<=0&&(m1_command_scaled==0||m4_command_scaled==0))
   {
     allow_integral=false;
   }
-
+  */
+  
   if (allow_integral) integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
-  if (PWM_throttle < 1300) {   //Don't let integrator build if throttle is too low
+  
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is probably not sufficient to lift off ground
     integral_pitch = 0;
   }
   
-  integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
+  integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Limit integrator to prevent unsafe buildup
   derivative_pitch = GyroY;
 
   pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
@@ -804,7 +952,7 @@ void PIDControlCalcs() {
   //Yaw, stablize on rate from GyroZ versus angle.  In other words, your stick is setting y axis rotation speed - not the angle to get to.
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw*deltaTime;
-  if (PWM_throttle < 1300) {   //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
@@ -853,7 +1001,7 @@ void getRadioSticks() {
     PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
-  float b = 0.4; //0.1-1 Lower=slower, higher=noiser default 0.7
+  float b = 0.1; //0.1-1 Lower=slower, higher=noiser default 0.7
 
   PWM_throttle = (1.0 - b)*PWM_throttle_prev + b*PWM_throttle;
   PWM_roll = (1.0 - b)*PWM_roll_prev + b*PWM_roll;
@@ -1036,7 +1184,7 @@ void printAccelData() {
   }
 }
 void printJSON(){
-  if (current_time - print_counter > 25000) { //Don't go too fast or it slows down the main loop
+  if (current_time - print_counter > 34000) { //Don't go too fast or it slows down the main loop
     print_counter = micros();
     Serial.print(F("{\"roll\": "));
     Serial.print(roll_IMU);
@@ -1274,4 +1422,27 @@ void getCh5() {
 String tuningProcedure()
 {
   return "<hr><h3><b>Ziegler-Nichols</b></h3>  <p>The Ziegler-Nichols tuning method is one of the most famous ways to experimentally tune a PID controller. The basic algorithm is as follows:</p><ol><li>Turn off the Integral and Derivative components for the controller; only use Proportional control.</li><li>Slowly increase the gain (i.e. <em>K<sub>p</sub></em>, the Proportion constant) until the process starts to oscillate<br />This final gain value is known as the ultimate gain, or <em>K<sub>u</sub></em><br />The period of oscillation is the ultimate period, or <em>T<sub>u</sub></em></li><li>Use the following table to derive the PID variables</li></ol></div></div><div class=\"sqs-block code-block sqs-block-code\" data-block-type=\"23\" id=\"block-yui_3_17_2_1_1598301478634_207710\"><div class=\"sqs-block-content\"><style type=\"text/css\">.tg  {border-collapse:collapse;border-spacing:0;}.tg td{border-color:black;border-style:solid;border-width:1px;  overflow:hidden;padding:10px 5px;word-break:normal;}.tg th{border-color:black;border-style:solid;border-width:1px;  font-weight:normal;overflow:hidden;padding:10px 5px;word-break:normal;}.tg .tg-gr1d{background-color:#e9f4fc;border-color:#337494;font-weight:bold;text-align:left;vertical-align:top}.tg .tg-m4ds{border-color:#337494;text-align:center;vertical-align:top}.tg .tg-bxxa{border-color:#337494;text-align:left;vertical-align:top}.tg .tg-hk19{background-color:#e9f4fc;border-color:#337494;font-weight:bold;text-align:center;vertical-align:top}.tg .tg-vaq8{background-color:#e9f4fc;border-color:#337494;text-align:left;vertical-align:top}.tg .tg-e1cu{background-color:#e9f4fc;border-color:#337494;text-align:center;vertical-align:top}</style><table class=\"table\"><thead>  <tr>    <th class=\"tg-gr1d\">Controller</th>    <th class=\"tg-hk19\">K<sub>p</sub></th>    <th class=\"tg-hk19\">T<sub>i</sub></th>    <th class=\"tg-hk19\">T<sub>d</sub></th>  </tr></thead><tbody>  <tr>    <td class=\"tg-bxxa\">P</td>    <td class=\"tg-m4ds\">K<sub>u</sub>/2</td>    <td class=\"tg-m4ds\"></td>    <td class=\"tg-m4ds\"></td>  </tr>  <tr>    <td class=\"tg-vaq8\">PI</td>    <td class=\"tg-e1cu\">K<sub>u</sub>/2.5</td>    <td class=\"tg-e1cu\">T<sub>u</sub>/1.25</td>    <td class=\"tg-e1cu\"></td>  </tr>  <tr>    <td class=\"tg-bxxa\">PID</td>    <td class=\"tg-m4ds\">0.6K<sub>u</sub></td>    <td class=\"tg-m4ds\">T<sub>u</sub>/2</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/8</td>  </tr>  <tr>    <td class=\"tg-vaq8\">Pessen Integral Rule<br></td>    <td class=\"tg-e1cu\">0.7K<sub>u</sub></td>    <td class=\"tg-e1cu\">0.4T<sub>u</sub></td>    <td class=\"tg-e1cu\">0.15T<sub>u</sub></td>  </tr>  <tr>    <td class=\"tg-bxxa\">Moderate overshoot</td>    <td class=\"tg-m4ds\">K<sub>u</sub>/3</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/2</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/3</td>  </tr>  <tr>    <td class=\"tg-vaq8\">No overshoot</td>    <td class=\"tg-e1cu\">K<sub>u</sub>/5</td>    <td class=\"tg-e1cu\">T<sub>u</sub>/2</td>    <tdclass=\"tg-e1cu\">T<sub>u</sub>/3</td>  </tr></tbody></table>";
+}
+//HELPER FUNCTIONS
+
+float invSqrt(float x) {
+  //Fast inverse sqrt for madgwick filter
+  /*
+  float halfx = 0.5f * x;
+  float y = x;
+  long i = *(long*)&y;
+  i = 0x5f3759df - (i>>1);
+  y = *(float*)&i;
+  y = y * (1.5f - (halfx * y * y));
+  y = y * (1.5f - (halfx * y * y));
+  return y;
+  */
+  /*
+  //alternate form:
+  unsigned int i = 0x5F1F1412 - (*(unsigned int*)&x >> 1);
+  float tmp = *(float*)&i;
+  float y = tmp * (1.69000231f - 0.714158168f * x * tmp * tmp);
+  return y;
+  */
+  return 1.0/sqrtf(x); //Teensy is fast enough to just take the compute penalty lol suck it arduino nano
 }
