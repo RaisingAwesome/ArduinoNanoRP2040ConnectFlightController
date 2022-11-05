@@ -32,5 +32,4 @@ The second consideration was battery management. Many of the LiPo batteries avai
 In turn, a means of letting the drone pilot know the battery is draining too low had to be designed.  We achieved this by applying a voltage divider here as well. In our case, we had a 14.8V divided to just under 3Vs. The closer the battery approaches undervoltage (12.8V), the beeper will increase its beep rate until it is too annoying to want to continue use.
 
 Otherwise, the rest of the design was just focused on providing reliable wire hookups between the drone receiver and motor electronic speed controllers (ESCs).
-## Code Considerations
-As mentioned, we started with the dRehmFlight repository as our base code.  We altered many of the functions to work with our hardware.  At this time, we are awating our PCB to tune the PID Constants.
+
