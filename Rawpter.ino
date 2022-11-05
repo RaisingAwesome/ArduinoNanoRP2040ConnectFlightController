@@ -356,7 +356,10 @@ void loopWiFi() {
         }
         else if (currentLine.endsWith("GET / HTTP"))
         { //Handle hitting the basic page (1st connection)
-          MakeWebPage(client,"<h1>Rawpter V1.0</h1><small>by Raising Awesome</small><br>" + GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />");
+          String myMsg="<h1>Rawpter V1.4</h1><small>by Raising Awesome</small><br>";
+          myMsg+="Snapshot Roll: " + String(roll_IMU) + "&#176;&nbsp;&nbsp;&nbsp;Pitch: " + String(pitch_IMU) + "&#176;<br>";
+          myMsg+= GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />";
+          MakeWebPage(client,myMsg);
         }
       }
     }
