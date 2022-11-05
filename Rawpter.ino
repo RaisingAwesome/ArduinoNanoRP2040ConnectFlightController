@@ -1,4 +1,4 @@
-//Rawpter 1.2 by Sean J. Miller
+//Rawpter 1.4 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
 //Go to https://raisingawesome.site/projects for more info
 //MIT License - use for any purpose you want
@@ -13,13 +13,14 @@
 //========================================================================================================================//
 //EASYCHAIR is used to put in some key dummy variables so you can sit in the easy chair with just the Arduino on a cord wiggling it around and seeing how it responds.
 //Set EASYCHAIR to false when you are wanting to install it in the drone.
-#define EASYCHAIR false
+#define EASYCHAIR true
 
 //The LOOP_TIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.  So, the loop time is set a little longer so the IMU has time to update from the control change.
 #define LOOP_TIMING 100
 
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
 #define BATTERYTYPE 14.8
+#define BUZZER_PIN 9
 int batteryVoltage=1023; //just a default for the battery monitoring routine
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
@@ -31,17 +32,19 @@ unsigned long PWM_elevation_fs = 1500; //elev
 unsigned long PWM_rudd_fs = 1500; //rudd
 unsigned long PWM_ThrottleCutSwitch_fs = 1000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
 bool UPONLYMODE=false; //UPONLYMODE is used to take the radio out of it other than thrust.  The intent is to get it tuned so it can at least take off.  Should be false once tuned.
+float stick_dampener = 0.1; //0.1-1 Lower=slower, higher=noiser default 0.7
 
 bool failsafed=false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
-float AccErrorX = 0.01;
-float AccErrorY = -0.01;
-float AccErrorZ = 0.01;
-float Accel_filter=0.95;
-float GyroErrorX = 0.42;
-float GyroErrorY= 0.07;
-float GyroErrorZ = -0.05;
+float AccErrorX = -0.07;
+float AccErrorY = -0.00;
+float AccErrorZ = 0.00;
+float GyroErrorX = 0.39;
+float GyroErrorY = -0.09;
+float GyroErrorZ = -0.87;
+
 float Gyro_filter = 0.95;
+float Accel_filter=0.95;
 
 float B_madgwick = 0.02; //(default 0.04)
 float q0 = 1.0f; //Initialize quaternion for madgwick filter
@@ -50,23 +53,23 @@ float q2 = 0.0f;
 float q3 = 0.0f;
 
 //Controller parameters (take note of defaults before modifying!): 
-float i_limit = 300.0;     //Integrator saturation level, mostly for safety (default 25.0)
-float maxRoll = 15.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
-float maxPitch = 15.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
-float maxYaw = 160.0;     //Max yaw rate in deg/sec (default 160.0)
-float maxMotor=0.5;
-float minThrottle=0.8; //this minimum percentage of throttle to allow a PID to subtract.  Prevents from stopping a prop.
-float Kp_roll_angle = 0.2;    //Roll P-gain - angle mode default .2
-float Ki_roll_angle = 0.3;    //Roll I-gain - angle mode default .3
-float Kd_roll_angle = 0.05;   //Roll D-gain - angle mode default 0.05
+float i_limit = 12.5;     //Integrator saturation level, mostly for safety (default 25.0)
+float maxRoll = 18.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxPitch = 18.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxYaw = 10.0;     //Max yaw rate in deg/sec (default 160.0)
+float maxMotor=1.0;
+float minThrottle=0.0; //this minimum percentage of throttle to allow a PID to subtract.  Prevents from stopping a prop.
+float Kp_roll_angle = 0.25;    //Roll P-gain - angle mode default .2
+float Ki_roll_angle = 0.05;    //Roll I-gain - angle mode default .3
+float Kd_roll_angle = 0.02;   //Roll D-gain - angle mode default 0.05
 
-float Kp_pitch_angle = 0.2;   //Pitch P-gain - angle mode default .2
-float Ki_pitch_angle = 0.3;   //Pitch I-gain - angle mode default .3
-float Kd_pitch_angle = 0.05;  //Pitch D-gain - angle mode default .05
+float Kp_pitch_angle = 0.15;   //Pitch P-gain - angle mode default .2
+float Ki_pitch_angle = 0.1;   //Pitch I-gain - angle mode default .3
+float Kd_pitch_angle = 0.02;  //Pitch D-gain - angle mode default .05
 
-float Kp_yaw = 0.00;           //Yaw P-gain default .3
-float Ki_yaw = 0.00;          //Yaw I-gain default .05
-float Kd_yaw = 0.00;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
+float Kp_yaw = 0.15;           //Yaw P-gain default .3
+float Ki_yaw = 0.025;          //Yaw I-gain default .05
+float Kd_yaw = 0.0;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
 
 //========================================================================================================================//
 //                                                     DECLARE PINS                                                       //                           
@@ -122,7 +125,6 @@ unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwi
 unsigned long PWM_throttle_prev,PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
 
 //IMU:
-
 float AccX, AccY, AccZ;
 float AccX_prev, AccY_prev, AccZ_prev;
 float GyroX, GyroY, GyroZ;
@@ -141,6 +143,8 @@ float error_yaw, error_yaw_prev, integral_yaw, integral_yaw_prev, derivative_yaw
 
 //Mixer
 float m1_command_scaled, m2_command_scaled, m3_command_scaled, m4_command_scaled;
+float m1_previous, m2_previous, m3_previous, m4_previous;
+float rate=1.0;
 int m1_command_PWM, m2_command_PWM, m3_command_PWM, m4_command_PWM;
 unsigned long buzzer_millis; unsigned long buzzer_spacing=10000;
 
@@ -166,7 +170,7 @@ void setup() {
 
 void loop() {
   tick(); //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
-  //loopBuzzer();
+  loopBuzzer();
   //The main thread that infinitely loops - poling sensors and taking action.
   
   if (ALLOW_WIFI) loopWiFi();
@@ -210,7 +214,7 @@ void setupDrone() {
   {
     delay(1000);
   }
-  //calibrateAttitude(); This is only good if you are sure to start level.
+  //calibrateAttitude(); //This is only good if you are sure to start level.
 }
 
 void loopDrone() {
@@ -240,7 +244,7 @@ void loopBuzzer()
   if (!beeping){    
     if ( millis()-buzzer_millis>(buzzer_spacing) )
     {
-        digitalWrite(9,HIGH);
+        digitalWrite(BUZZER_PIN,HIGH);
         beeping=true;
         buzzer_millis=millis();
     }
@@ -250,7 +254,7 @@ void loopBuzzer()
     {
       beeping=false;
       buzzer_millis=millis();
-      digitalWrite(9,LOW);  
+      digitalWrite(BUZZER_PIN,LOW);  
     }
   }
 
@@ -284,9 +288,8 @@ void Troubleshooting() {
     //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
     //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
     //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations and less the Gyro/Acc update speed.  Set by LOOP_TIMING)
-    printJSON();
+    if (EASYCHAIR) printJSON();
   }
-
 
 void setupSerial(){
   Serial.begin(2000000);
@@ -295,7 +298,7 @@ void setupSerial(){
 
 void setupWiFi()
 {
-  char ssid[] = "0Rawpter";        
+  char ssid[] = "_Rawpter";        
   char pass[] = "12345678";    
 
   // check for the WiFi module:
@@ -353,7 +356,7 @@ void loopWiFi() {
         }
         else if (currentLine.endsWith("GET / HTTP"))
         { //Handle hitting the basic page (1st connection)
-          MakeWebPage(client,"<h1>Rawpter V1.0 <small>by Raising Awesome</small></h1>" + GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />");
+          MakeWebPage(client,"<h1>Rawpter V1.0</h1><small>by Raising Awesome</small><br>" + GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />");
         }
       }
     }
@@ -391,6 +394,18 @@ void setTheValuesFromUserForm(WiFiClient client)
           }
           maxMotor=myValue.toFloat();          
       }
+      if (currentLine.endsWith("rate="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          rate=myValue.toFloat();          
+      }
       if (currentLine.endsWith("minThrottle="))
       {
           String myValue="";
@@ -402,6 +417,18 @@ void setTheValuesFromUserForm(WiFiClient client)
             currentLine+=c;
           }
           minThrottle=myValue.toFloat();          
+      }
+      if (currentLine.endsWith("stick_dampener="))
+      {
+          String myValue="";
+
+          while (!currentLine.endsWith("&"))
+          {
+            c = client.read();
+            if (c!='&') myValue+=c;
+            currentLine+=c;
+          }
+          stick_dampener=myValue.toFloat();          
       }
 
       if (currentLine.endsWith("i_limit="))
@@ -575,19 +602,21 @@ void setTheValuesFromUserForm(WiFiClient client)
 String GetParameters()
 {
   String myString;
-  myString=myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=text name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
-  myString=myString + "<tr><td>Min Throttle Reduction (0.0-1.0):</td><td><input type=text name=minThrottle style='width:70px;' value='" + String(minThrottle) + "'></td></tr>";
-  myString=myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=text name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr>";
-  myString=myString + "<tr><td>Accel Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=text name=Accel_filter style='width:70px;' value='" + String(Accel_filter) + "'></td></tr>";
-  myString=myString + "<tr><td>Gyro Dampening (0.1-1.0 ):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=text name=Gyro_filter style='width:70px;' value='" + String(Gyro_filter) + "'></td></tr>";
+  myString=myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=number step=.001 name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
+  myString=myString + "<tr><td>Motor Change Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=rate style='width:70px;' value='" + String(rate) + "'></td></tr>";
+  myString=myString + "<tr><td>Min Throttle Reduction (0.0-1.0):</td><td><input type=number step=.001 name=minThrottle style='width:70px;' value='" + String(minThrottle) + "'></td></tr>";
+  myString=myString + "<tr><td>Stick Dampening (0.01-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=stick_dampener style='width:70px;' value='" + String(stick_dampener) + "'></td></tr>";
+  myString=myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=number step=.001 name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr>";
+  myString=myString + "<tr><td>Accel Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Accel_filter style='width:70px;' value='" + String(Accel_filter) + "'></td></tr>";
+  myString=myString + "<tr><td>Gyro Dampening (0.1-1.0 ):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Gyro_filter style='width:70px;' value='" + String(Gyro_filter) + "'></td></tr>";
   String myVal;
   if (!UPONLYMODE) myVal=""; else myVal="checked";
   myString=myString + "<tr><td>Up Mode Only:</td><td><input type=CHECKBOX name=UPONLYMODE value='true' " + (myVal) + "></td></tr>";
   myString=myString + "</table>";
   myString=myString + "<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
-  myString=myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=text value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=text value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=text style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
-  myString=myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=text value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=text value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=text  style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
-  myString=myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=text  style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=text name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=text name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'></td></tr><input type=hidden name=ender value='0'>";
+  myString=myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=number step=.001 value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=number step=.001 value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=number step=.001 style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
+  myString=myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=number step=.001 value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=number step=.001 value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=number step=.001 style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
+  myString=myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=number step=.001 style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=number step=.001 name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=number step=.001 name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'></td></tr><input type=hidden name=ender value='0'>";
   myString=myString + "</table><br>Tip: To use your parameters beyond this flight session, snapshot the screen for reference and update the code.<br>";
   return myString;
 }
@@ -643,15 +672,11 @@ void controlMixer() {
    */
    
   //Quad mixing
-  //m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front left
-  //m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front right
-  //m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
-  //m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
-  m1_command_scaled = thro_des + pitch_PID + roll_PID + yaw_PID; //Front left
-  m2_command_scaled = thro_des + pitch_PID - roll_PID - yaw_PID; //Front right
-  m3_command_scaled = thro_des - pitch_PID - roll_PID + yaw_PID; //Back Right
-  m4_command_scaled = thro_des - pitch_PID + roll_PID - yaw_PID; //Back Left
-  
+  m1_command_scaled = maxMotor*(thro_des - pitch_PID + roll_PID + yaw_PID); //Front left
+  m2_command_scaled = maxMotor*(thro_des - pitch_PID - roll_PID - yaw_PID); //Front right
+  m3_command_scaled = maxMotor*(thro_des + pitch_PID - roll_PID + yaw_PID); //Back Right
+  m4_command_scaled = maxMotor*(thro_des + pitch_PID + roll_PID - yaw_PID); //Back Left
+ 
   float minimum=thro_des*minThrottle;
 
   m1_command_scaled=constrain(m1_command_scaled,minimum,maxMotor);
@@ -659,6 +684,15 @@ void controlMixer() {
   m3_command_scaled=constrain(m3_command_scaled,minimum,maxMotor);
   m4_command_scaled=constrain(m4_command_scaled,minimum,maxMotor);
 
+  m1_command_scaled=(1-rate)*m1_previous + rate*m1_command_scaled;
+  m2_command_scaled=(1-rate)*m2_previous + rate*m2_command_scaled;
+  m3_command_scaled=(1-rate)*m3_previous + rate*m3_command_scaled;
+  m4_command_scaled=(1-rate)*m4_previous + rate*m4_command_scaled;
+
+  m1_previous=m1_command_scaled;
+  m2_previous=m2_command_scaled;
+  m3_previous=m3_command_scaled;
+  m4_previous=m4_command_scaled;
 }
 
 void IMUinit() {
@@ -906,10 +940,7 @@ void PIDControlCalcs() {
   
   //Roll
   if (UPONLYMODE) roll_des=0;
-  if (throttle_is_cut) {
-    integral_roll=0; integral_pitch=0; integral_yaw=0;
-  }
-
+  
   error_roll = roll_des - roll_IMU;
   integral_roll = integral_roll_prev + error_roll*deltaTime;
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
@@ -922,29 +953,15 @@ void PIDControlCalcs() {
 
   //Pitch
   if (UPONLYMODE) pitch_des=0;
-  pitch_des=0;
   error_pitch = pitch_des - pitch_IMU;
-
-  bool allow_integral=true;
-
-  //prevent pitch saturation
-  /*
-  if (error_pitch>0&&m1_command_scaled==maxMotor||m4_command_scaled==0)
-  {
-    allow_integral=false;
-  } else if (error_pitch<=0&&(m1_command_scaled==0||m4_command_scaled==0))
-  {
-    allow_integral=false;
-  }
-  */
   
-  if (allow_integral) integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
+  integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
   
   if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is probably not sufficient to lift off ground
     integral_pitch = 0;
   }
-  
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Limit integrator to prevent unsafe buildup
+  
   derivative_pitch = GyroY;
 
   pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
@@ -1001,12 +1018,15 @@ void getRadioSticks() {
     PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
-  float b = 0.1; //0.1-1 Lower=slower, higher=noiser default 0.7
-
-  PWM_throttle = (1.0 - b)*PWM_throttle_prev + b*PWM_throttle;
-  PWM_roll = (1.0 - b)*PWM_roll_prev + b*PWM_roll;
-  PWM_Elevation = (1.0 - b)*PWM_Elevation_prev + b*PWM_Elevation;
-  PWM_Rudd = (1.0 - b)*PWM_Rudd_prev + b*PWM_Rudd;
+  if (PWM_throttle_prev-PWM_throttle>0) {
+    PWM_throttle = (1.0 - stick_dampener)*PWM_throttle_prev + stick_dampener*PWM_throttle;
+  } else
+  { //go down slower than up
+    PWM_throttle = (stick_dampener)*PWM_throttle_prev + (1-stick_dampener)*PWM_throttle;
+  }
+  PWM_roll = (1.0 - stick_dampener)*PWM_roll_prev + stick_dampener*PWM_roll;
+  PWM_Elevation = (1.0 - stick_dampener)*PWM_Elevation_prev + stick_dampener*PWM_Elevation;
+  PWM_Rudd = (1.0 - stick_dampener)*PWM_Rudd_prev + stick_dampener*PWM_Rudd;
 
   PWM_throttle_prev = PWM_throttle;
   PWM_roll_prev =PWM_roll;
@@ -1104,7 +1124,16 @@ void throttleCut() {
       throttleCutCounter=0;
     } else killMotors();
     return;
-  }  
+  }
+
+  //Handle when things are going upside down
+  if (roll_IMU>50||roll_IMU<-50||pitch_IMU>50||pitch_IMU<-50)
+  {
+    if (++throttleCutCounter>10) killMotors(); 
+    return;
+  }
+  throttleNotCutCounter=0;
+
 }
 
 void killMotors(){
