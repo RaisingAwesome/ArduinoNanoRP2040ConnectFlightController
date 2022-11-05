@@ -1,5 +1,9 @@
 # Arduino Nano RP2040 Connect Flight Controller
+
+<div align=center><img src=https://user-images.githubusercontent.com/38836869/200135663-ea6b8495-fe91-43e7-9829-e90665b17b86.png width=400></div>
+
 ## Introduction
+
 The Arduino Nano RP2040 Connect comes with a built in IMU. It's fast processing speed and ability to program it with the Arduino IDE makes for a great microcontroller to serve as a quadcopter (drone) flight controller.
 
 The code in the repository is MIT licensed open source.  Do whatever you like with it. If you'd like to simply contribute to this source, perform a pull request and get your 'git' on.  We'd appreciate it.
