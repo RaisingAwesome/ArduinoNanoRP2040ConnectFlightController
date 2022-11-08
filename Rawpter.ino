@@ -1,19 +1,19 @@
-//Rawpter 1.4 by Sean J. Miller
+//Rawpter 1.5 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
 //Go to https://raisingawesome.site/projects for more info
-//MIT License - use for any purpose you want
+//MIT License - use at your own risk for any purpose you want
 
 #include <SPI.h>
-#include <WiFiNINA.h> //WiFi
-#include <Arduino_LSM6DSOX.h> //IMU get from the Arduino IDE Library Manager
-#include <Servo.h> //get from the Arduino IDE Library Manager
+#include <WiFiNINA.h>          //WiFi
+#include <Arduino_LSM6DSOX.h>  //IMU get from the Arduino IDE Library Manager
+#include <Servo.h>             //get from the Arduino IDE Library Manager
 
 //========================================================================================================================//
-//                                               USER-SPECIFIED VARIABLES                                                 //                           
+//                                               USER-SPECIFIED VARIABLES                                                 //
 //========================================================================================================================//
 //EASYCHAIR is used to put in some key dummy variables so you can sit in the easy chair with just the Arduino on a cord wiggling it around and seeing how it responds.
 //Set EASYCHAIR to false when you are wanting to install it in the drone.
-#define EASYCHAIR true
+#define EASYCHAIR false
 
 //The LOOP_TIMING is based on the IMU.  For the Arduino_LSM6DSOX, it is 104Hz.  So, the loop time is set a little longer so the IMU has time to update from the control change.
 #define LOOP_TIMING 100
@@ -21,90 +21,92 @@
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
 #define BATTERYTYPE 14.8
 #define BUZZER_PIN 9
-int batteryVoltage=1023; //just a default for the battery monitoring routine
+int batteryVoltage = 1023;             //just a default for the battery monitoring routine
+unsigned long next_voltage_check = 0;  //used in loopBuzzer to check for voltage on the main battery.
+bool beeping = false;         //For tracking beeping when the battery is getting low.
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected.
 //These are for it to stay stable and descend safely versus totally cutting throttle and drop like a rock.
-unsigned long PWM_throttle_zero = 1000; //used when we want to take throttle to zero.  Failsafe is something higher as it is expected that failsafe is a value needed to safely land.
-unsigned long PWM_throttle_fs = 1000; //throttle  will allow it to descend to the ground if you adjust the throttlecutswitch_fs to 2000
-unsigned long PWM_roll_fs = 1500; //ail pretty much in the middle so it quits turning
-unsigned long PWM_elevation_fs = 1500; //elev
-unsigned long PWM_rudd_fs = 1500; //rudd
-unsigned long PWM_ThrottleCutSwitch_fs = 1000; //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
-bool UPONLYMODE=false; //UPONLYMODE is used to take the radio out of it other than thrust.  The intent is to get it tuned so it can at least take off.  Should be false once tuned.
-float stick_dampener = 0.1; //0.1-1 Lower=slower, higher=noiser default 0.7
+unsigned long PWM_throttle_zero = 1000;         //used when we want to take throttle to zero.  Failsafe is something higher as it is expected that failsafe is a value needed to safely land.
+unsigned long PWM_throttle_fs = 1000;           //throttle  will allow it to descend to the ground if you adjust the throttlecutswitch_fs to 2000
+unsigned long PWM_roll_fs = 1500;               //ail pretty much in the middle so it quits turning
+unsigned long PWM_elevation_fs = 1500;          //elev
+unsigned long PWM_rudd_fs = 1500;               //rudd
+unsigned long PWM_ThrottleCutSwitch_fs = 1000;  //SWA less than 1300, cut throttle - must config a switch to Channel 5 in your remote.
+bool UPONLYMODE = false;                        //UPONLYMODE is used to take the radio out of it other than thrust.  The intent is to get it tuned so it can at least take off.  Should be false once tuned.
+float stick_dampener = 0.1;                     //0.1-1 Lower=slower, higher=noiser default 0.7
 
-bool failsafed=false;
+bool failsafed = false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
 float AccErrorX = -0.07;
-float AccErrorY = -0.00;
+float AccErrorY = 0.00;
 float AccErrorZ = 0.00;
 float GyroErrorX = 0.39;
 float GyroErrorY = -0.09;
 float GyroErrorZ = -0.87;
 
 float Gyro_filter = 0.95;
-float Accel_filter=0.95;
+float Accel_filter = 0.95;
 
-float B_madgwick = 0.02; //(default 0.04)
-float q0 = 1.0f; //Initialize quaternion for madgwick filter
+float B_madgwick = 0.02;  //(default 0.04)
+float q0 = 1.0f;          //Initialize quaternion for madgwick filter
 float q1 = 0.0f;
 float q2 = 0.0f;
 float q3 = 0.0f;
 
-//Controller parameters (take note of defaults before modifying!): 
-float i_limit = 12.5;     //Integrator saturation level, mostly for safety (default 25.0)
-float maxRoll = 18.0;     //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
-float maxPitch = 18.0;    //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
-float maxYaw = 10.0;     //Max yaw rate in deg/sec (default 160.0)
-float maxMotor=1.0;
-float minThrottle=0.0; //this minimum percentage of throttle to allow a PID to subtract.  Prevents from stopping a prop.
-float Kp_roll_angle = 0.25;    //Roll P-gain - angle mode default .2
-float Ki_roll_angle = 0.05;    //Roll I-gain - angle mode default .3
-float Kd_roll_angle = 0.02;   //Roll D-gain - angle mode default 0.05
+//Controller parameters (take note of defaults before modifying!):
+float i_limit = 12.5;   //Integrator saturation level, mostly for safety (default 25.0)
+float maxRoll = 18.0;   //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxPitch = 18.0;  //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
+float maxYaw = 10.0;    //Max yaw rate in deg/sec (default 160.0)
+float maxMotor = 1.0;
 
-float Kp_pitch_angle = 0.15;   //Pitch P-gain - angle mode default .2
+float Kp_roll_angle = 0.25;  //Roll P-gain - angle mode default .2
+float Ki_roll_angle = 0.05;  //Roll I-gain - angle mode default .3
+float Kd_roll_angle = 0.02;  //Roll D-gain - angle mode default 0.05
+
+float Kp_pitch_angle = 0.15;  //Pitch P-gain - angle mode default .2
 float Ki_pitch_angle = 0.1;   //Pitch I-gain - angle mode default .3
 float Kd_pitch_angle = 0.02;  //Pitch D-gain - angle mode default .05
 
-float Kp_yaw = 0.15;           //Yaw P-gain default .3
-float Ki_yaw = 0.025;          //Yaw I-gain default .05
-float Kd_yaw = 0.0;       //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
+float Kp_yaw = 0;  //Yaw P-gain default .3
+float Ki_yaw = 0;  //Yaw I-gain default .05
+float Kd_yaw = 0;  //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
 
 //========================================================================================================================//
-//                                                     DECLARE PINS                                                       //                           
-//========================================================================================================================//                                          
+//                                                     DECLARE PINS                                                       //
+//========================================================================================================================//
 //Radio:
 //used so I quit getting confused begween the ARduino pins and the Radio Channel pins.
-const int stickRightHorizontal=2; //right horizontal stick
-const int stickRightVertical=3; //right vertical stick
-const int stickLeftVertical=4; //left vertical stick
-const int stickLeftHorizontal=5; //left horizontal stick
-const int SwitchA=6; //SWA switch
+const int stickRightHorizontal = 2;  //right horizontal stick
+const int stickRightVertical = 3;    //right vertical stick
+const int stickLeftVertical = 4;     //left vertical stick
+const int stickLeftHorizontal = 5;   //left horizontal stick
+const int SwitchA = 6;               //SWA switch
 
-const int throttlePin = stickLeftVertical; //throttle - up and down on the 
-const int rollPin = stickRightHorizontal; //ail (roll)
-const int upDownPin = stickRightVertical; //ele
-const int ruddPin = stickLeftHorizontal; //rudd
-const int throttleCutSwitchPin = SwitchA; //gear (throttle cut)
+const int throttlePin = stickLeftVertical;  //throttle - up and down on the
+const int rollPin = stickRightHorizontal;   //ail (roll)
+const int upDownPin = stickRightVertical;   //ele
+const int ruddPin = stickLeftHorizontal;    //rudd
+const int throttleCutSwitchPin = SwitchA;   //gear (throttle cut)
 
 //variables for reading PWM from the radio receiver
-unsigned long rising_edge_start_1, rising_edge_start_2, rising_edge_start_3, rising_edge_start_4, rising_edge_start_5, rising_edge_start_6; 
-unsigned long channel_1_raw=0;
-unsigned long channel_2_raw=0;
-unsigned long channel_3_raw=0;
-unsigned long channel_4_raw=0;
-unsigned long channel_5_raw=0;
+unsigned long rising_edge_start_1, rising_edge_start_2, rising_edge_start_3, rising_edge_start_4, rising_edge_start_5, rising_edge_start_6;
+unsigned long channel_1_raw = 0;
+unsigned long channel_2_raw = 0;
+unsigned long channel_3_raw = 0;
+unsigned long channel_4_raw = 0;
+unsigned long channel_5_raw = 0;
 
 int ppm_counter = 0;
 unsigned long time_ms = 0;
-int throttleCutCounter=0;
-int throttleNotCutCounter=0;
+int throttleCutCounter = 0;
+int throttleNotCutCounter = 0;
 //Motor Electronic Speed Control Modules (ESC):
-const int m1Pin = 10; //10
-const int m2Pin = 15; //15
-const int m3Pin = 16; //16
-const int m4Pin = 14; //14
+const int m1Pin = 10;  //10
+const int m2Pin = 15;  //15
+const int m3Pin = 16;  //16
+const int m4Pin = 14;  //14
 Servo m1PWM, m2PWM, m3PWM, m4PWM;
 
 //========================================================================================================================//
@@ -112,17 +114,16 @@ Servo m1PWM, m2PWM, m3PWM, m4PWM;
 //========================================================================================================================//
 
 //General stuff for controlling timing of things
-float deltaTime; float mt=0;
-float invFreq = (1.0/LOOP_TIMING)*1000000.0;
+float deltaTime;
+float invFreq = (1.0 / LOOP_TIMING) * 1000000.0;
 
 unsigned long current_time, prev_time;
 unsigned long print_counter, serial_counter;
-bool beeping=false; //for beeping when the battery is getting low.
-bool throttle_is_cut=true; //used to force the pilot to manually set the throttle to zero after the switch is used to throttle cut
+bool throttle_is_cut = true;  //used to force the pilot to manually set the throttle to zero after the switch is used to throttle cut
 
 //Radio communication:
-unsigned long PWM_throttle,PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwitch;
-unsigned long PWM_throttle_prev,PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
+unsigned long PWM_throttle, PWM_roll, PWM_Elevation, PWM_Rudd, PWM_ThrottleCutSwitch;
+unsigned long PWM_throttle_prev, PWM_roll_prev, PWM_Elevation_prev, PWM_Rudd_prev;
 
 //IMU:
 float AccX, AccY, AccZ;
@@ -134,7 +135,6 @@ float roll_IMU_prev, pitch_IMU_prev;
 
 //Normalized desired state:
 float thro_des, roll_des, pitch_des, yaw_des;
-float roll_passthru, pitch_passthru, yaw_passthru;
 
 //Controller:
 float error_roll, error_roll_prev, roll_des_prev, integral_roll, integral_roll_il, integral_roll_ol, integral_roll_prev, integral_roll_prev_il, integral_roll_prev_ol, derivative_roll, roll_PID = 0;
@@ -144,14 +144,15 @@ float error_yaw, error_yaw_prev, integral_yaw, integral_yaw_prev, derivative_yaw
 //Mixer
 float m1_command_scaled, m2_command_scaled, m3_command_scaled, m4_command_scaled;
 float m1_previous, m2_previous, m3_previous, m4_previous;
-float rate=1.0;
+float rate = 1.0;  //This sets how quickly the motors will respond to a change of their speed.  1 means instant, 0.1 is slow.  Effectively dampens the gain. Probably can just leave it as 1.0.
 int m1_command_PWM, m2_command_PWM, m3_command_PWM, m4_command_PWM;
-unsigned long buzzer_millis; unsigned long buzzer_spacing=10000;
+unsigned long buzzer_millis;
+unsigned long buzzer_spacing = 10000;
 
 //WiFi Begin
 int keyIndex = 0;
 int status = WL_IDLE_STATUS;
-bool ALLOW_WIFI=true;
+bool ALLOW_WIFI = true;
 
 WiFiServer server(80);
 //WiFi End
@@ -161,56 +162,55 @@ WiFiServer server(80);
 //========================================================================================================================//
 
 void setup() {
-  //Bootup operations 
+  //Bootup operations
   setupSerial();
+  if (ALLOW_WIFI) setupWiFi();  //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
   setupBatteryMonitor();
   setupDrone();
-  if (ALLOW_WIFI) setupWiFi(); //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
 }
 
 void loop() {
-  tick(); //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
+  tick();  //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
   loopBuzzer();
   //The main thread that infinitely loops - poling sensors and taking action.
-  
+
   if (ALLOW_WIFI) loopWiFi();
   loopDrone();
   tock();
 }
 
-void setupDrone() {  
+void setupDrone() {
   //Initialize all pins
-
   pinMode(m1Pin, OUTPUT);
   pinMode(m2Pin, OUTPUT);
   pinMode(m3Pin, OUTPUT);
   pinMode(m4Pin, OUTPUT);
-  m1PWM.attach(m1Pin,1060,1860);
-  m2PWM.attach(m2Pin,1060,1860);
-  m3PWM.attach(m3Pin,1060,1860);
-  m4PWM.attach(m4Pin,1060,1860);
+  m1PWM.attach(m1Pin, 1060, 1860);
+  m2PWM.attach(m2Pin, 1060, 1860);
+  m3PWM.attach(m3Pin, 1060, 1860);
+  m4PWM.attach(m4Pin, 1060, 1860);
   //Set built in LED to turn on to signal startup
   delay(5);
 
   //Initialize radio communication
   radioSetup();
   setToFailsafe();
-  PWM_throttle = PWM_throttle_zero; //zero may not necessarily be the failsafe, but on startup we want zero.
-  
+  PWM_throttle = PWM_throttle_zero;  //zero may not necessarily be the failsafe, but on startup we want zero.
+
   //Initialize IMU communication
   IMUinit();
 
   //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
   //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
 
-  if (getRadioPWM(1)>1800&&getRadioPWM(1)<2400&!EASYCHAIR) calibrateESCs(); //if the throttle is up, first calibrate ESCs before going into the loop
-  
-  m1_command_PWM = 0; //Will send the default for motor stopped for Simonk firmware
+  if (getRadioPWM(1) > 1800 && getRadioPWM(1) < 2400 & !EASYCHAIR) calibrateESCs();  //if the throttle is up, first calibrate ESCs before going into the loop
+
+  m1_command_PWM = 0;  //Will send the default for motor stopped for Simonk firmware
   m2_command_PWM = 0;
   m3_command_PWM = 0;
   m4_command_PWM = 0;
 
-  while (getRadioPWM(1)>1060&&getRadioPWM(1)<2400&!EASYCHAIR&&getRadioPWM(5)<1300) //wait until the throttle is turned down and throttlecut switch is not engaged before allowing anything else to happen.
+  while (getRadioPWM(1) > 1060 && getRadioPWM(1) < 2400 & !EASYCHAIR && getRadioPWM(5) < 1300)  //wait until the throttle is turned down and throttlecut switch is not engaged before allowing anything else to happen.
   {
     delay(1000);
   }
@@ -218,93 +218,90 @@ void setupDrone() {
 }
 
 void loopDrone() {
-  getIMUdata(); //Pulls raw gyro andaccelerometer data from IMU and applies LP filters to remove noise
-  Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ); //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
-  getDesiredAnglesAndThrottle(); //Convert raw commands to normalized values based on saturated control limits
-  PIDControlCalcs(); //The PID functions. Stabilize on angle setpoint from getDesiredAnglesAndThrottle
-  controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
-  scaleCommands(); //Scales motor commands to 0-1
-  throttleCut(); //Directly sets motor commands to off based on channel 5 being switched
-  Troubleshooting(); //will do the print routines that are uncommented
-  commandMotors(); //Sends command pulses to each ESC pin to drive the motors
-  getRadioSticks(); //Gets the PWM from the radio receiver
-  failSafe(); //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
+  getIMUdata();                                            //Pulls raw gyro andaccelerometer data from IMU and applies LP filters to remove noise
+  Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ);  //Updates roll_IMU, pitch_IMU, and yaw_IMU angle estimates (degrees)
+  getDesiredAnglesAndThrottle();                           //Convert raw commands to normalized values based on saturated control limits
+  PIDControlCalcs();                                       //The PID functions. Stabilize on angle setpoint from getDesiredAnglesAndThrottle
+  controlMixer();                                          //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
+  scaleCommands();                                         //Scales motor commands to 0-1
+  throttleCut();                                           //Directly sets motor commands to off based on channel 5 being switched
+  Troubleshooting();                                       //will do the print routines that are uncommented
+  commandMotors();                                         //Sends command pulses to each ESC pin to drive the motors
+  getRadioSticks();                                        //Gets the PWM from the radio receiver
+  failSafe();                                              //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
 }
 
-void setupBatteryMonitor()
+void setupBatteryMonitor() 
 {
-  buzzer_millis=millis();  
-  pinMode(9,OUTPUT);
-  pinMode(A6,INPUT);
+  buzzer_millis = millis();
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(A6, INPUT);
 }
 
-void loopBuzzer()
-{ //this monitors the battery.  the lower it gets, the faster it beeps.
-  
-  if (!beeping){    
-    if ( millis()-buzzer_millis>(buzzer_spacing) )
-    {
-        digitalWrite(BUZZER_PIN,HIGH);
-        beeping=true;
-        buzzer_millis=millis();
+void loopBuzzer() 
+{  //this monitors the battery.  the lower it gets, the faster it beeps.
+  if (!beeping) {
+    if (millis() - buzzer_millis > (buzzer_spacing)) {
+      digitalWrite(BUZZER_PIN, HIGH);
+      beeping = true;
+      buzzer_millis = millis();
     }
-  } else
-  {
-    if (millis()-buzzer_millis>80)
-    {
-      beeping=false;
-      buzzer_millis=millis();
-      digitalWrite(BUZZER_PIN,LOW);  
+  } else {
+    if (millis() - buzzer_millis > 80) {
+      beeping = false;
+      buzzer_millis = millis();
+      digitalWrite(BUZZER_PIN, LOW);
     }
   }
 
-  batteryVoltage=analogRead(A6);
-  if (BATTERYTYPE==14.8)
-  {
-    if (batteryVoltage>604) buzzer_spacing=40000;
-    else if (batteryVoltage>580) buzzer_spacing=30000;
-    else if (batteryVoltage>556) buzzer_spacing=20000;
-    else if (batteryVoltage>534) buzzer_spacing=10000;
-    else if (batteryVoltage>510) buzzer_spacing=500;
-    else buzzer_spacing=100;
-  } else
-  {
-    if (batteryVoltage>302) buzzer_spacing=40000;
-    else if (batteryVoltage>290) buzzer_spacing=30000;
-    else if (batteryVoltage>278) buzzer_spacing=20000;
-    else if (batteryVoltage>267) buzzer_spacing=10000;
-    else if (batteryVoltage>255) buzzer_spacing=500;
-    else buzzer_spacing=100;
+  if (millis() > next_voltage_check) {
+    next_voltage_check = millis() + 10000;  //checkvoltage once every 10 seconds versus every loop.
+    batteryVoltage = analogRead(A6);
+    if (BATTERYTYPE == 14.8) {
+      if (batteryVoltage > 604) buzzer_spacing = 40000;
+      else if (batteryVoltage > 580) buzzer_spacing = 30000;
+      else if (batteryVoltage > 556) buzzer_spacing = 20000;
+      else if (batteryVoltage > 534) buzzer_spacing = 10000;
+      else if (batteryVoltage > 510) buzzer_spacing = 500;
+      else buzzer_spacing = 100;
+    } else {
+      if (batteryVoltage > 302) buzzer_spacing = 40000;
+      else if (batteryVoltage > 290) buzzer_spacing = 30000;
+      else if (batteryVoltage > 278) buzzer_spacing = 20000;
+      else if (batteryVoltage > 267) buzzer_spacing = 10000;
+      else if (batteryVoltage > 255) buzzer_spacing = 500;
+      else buzzer_spacing = 100;
+    }
   }
 }
 
 void Troubleshooting() {
   //Print data at 100hz (uncomment one at a time for troubleshooting)
-    //printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
-    //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
-    //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
-    //printAccelData();     //Prints filtered accelerometer data direct from IMU (expected: ~ -2 to 2; x,y 0 when level, z 1 when level)
-    //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
-    //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
-    //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
-    //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations and less the Gyro/Acc update speed.  Set by LOOP_TIMING)
-    if (EASYCHAIR) printJSON();
-  }
-
-void setupSerial(){
-  Serial.begin(2000000);
-  delay(1000);
+  //printRadioData();     //Prints radio pwm values (expected: 1000 to 2000)
+  //printDesiredState();  //Prints desired vehicle state commanded in either degrees or deg/sec (expected: +/- maxAXIS for roll, pitch, yaw; 0 to 1 for throttle)
+  //printGyroData();      //Prints filtered gyro data direct from IMU (expected: ~ -250 to 250, 0 at rest)
+  //printAccelData();     //Prints filtered accelerometer data direct from IMU (expected: ~ -2 to 2; x,y 0 when level, z 1 when level)
+  //printRollPitchYaw();  //Prints roll, pitch, and yaw angles in degrees from Madgwick filter (expected: degrees, 0 when level)
+  //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
+  //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
+  //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations and less the Gyro/Acc update speed.  Set by LOOP_TIMING)
+  if (EASYCHAIR) printJSON();
 }
 
-void setupWiFi()
-{
-  char ssid[] = "_Rawpter";        
-  char pass[] = "12345678";    
+void setupSerial() {
+  Serial.begin(2000000);
+  delay(100);
+}
+
+void setupWiFi() {
+  char ssid[] = "_Rawpter";
+  char pass[] = "12345678";
 
   // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
     // don't continue because this is probably not an RP2040
-    while (true);
+    while (true)
+      ;
   }
 
   String fv = WiFi.firmwareVersion();
@@ -319,47 +316,45 @@ void setupWiFi()
   status = WiFi.beginAP(ssid, pass);
   if (status != WL_AP_LISTENING) {
     // don't continue
-    while (true);
+    while (true)
+      ;
   }
 
   // wait 1 seconds for connection:
-  delay(3000);
+  delay(1000);
 
   // start the web server on port 80
   server.begin();
 }
 
 void loopWiFi() {
-    // compare the previous status to the current status
-  WiFiClient client = server.available();   // listen for incoming clients
-  if (client) {                             // if you get a client,
-    String currentLine = "";                // make a String to hold incoming data from the client
-    while (client.connected()) {            // loop while the client's connected
-      if (client.available()) {             // if there's bytes to read from the client,
-        char c = client.read();             // read a byte, then
-        if (c == '\n') {                   
+  // compare the previous status to the current status
+  WiFiClient client = server.available();  // listen for incoming clients
+  if (client) {                            // if you get a client,
+    String currentLine = "";               // make a String to hold incoming data from the client
+    while (client.connected()) {           // loop while the client's connected
+      if (client.available()) {            // if there's bytes to read from the client,
+        char c = client.read();            // read a byte, then
+        if (c == '\n') {
           // if the current line is blank, you got two newline characters in a row.
           // that's the end of the client HTTP request, so send a response:
           if (currentLine.length() == 0) {
             break;
-          } else {    // if you got a newline, then clear currentLine:
+          } else {  // if you got a newline, then clear currentLine:
             currentLine = "";
           }
         } else if (c != '\r') {  // if you got anything else but a carriage return character,
           currentLine += c;      // add it to the end of the currentLine
         }
-        if (currentLine.endsWith("GET /?"))
-        {
+        if (currentLine.endsWith("GET /?")) {
           setTheValuesFromUserForm(client);
           //Handle clicking the Begin button
-          MakeWebPage(client,"<meta http-equiv = \"refresh\" content = \"0; url = http://192.168.2.4 \"/>");
-        }
-        else if (currentLine.endsWith("GET / HTTP"))
-        { //Handle hitting the basic page (1st connection)
-          String myMsg="<h1>Rawpter V1.4</h1><small>by Raising Awesome</small><br>";
-          myMsg+="Snapshot Roll: " + String(roll_IMU) + "&#176;&nbsp;&nbsp;&nbsp;Pitch: " + String(pitch_IMU) + "&#176;<br>";
-          myMsg+= GetParameters() +"<br><input class='mt-2 btn btn-primary' type=submit value='submit' />";
-          MakeWebPage(client,myMsg);
+          MakeWebPage(client, "<meta http-equiv = \"refresh\" content = \"0; url = http://192.168.2.4 \"/>");
+        } else if (currentLine.endsWith("GET / HTTP")) {  //Handle hitting the basic page (1st connection)
+          String myMsg = "<h1>Rawpter V1.5</h1><small>by Raising Awesome</small><br>";
+          myMsg += "Snapshot:<br>Desired Roll=" + String(roll_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Roll=" + String(roll_IMU) + "&#176;<br>Desired Pitch= " + String(pitch_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Pitch=" + String(pitch_IMU) + "&#176;&nbsp;&nbsp;&nbsp;Loop Time=: " + String(1 / (deltaTime / 1000000)) + "&nbsp;&nbsp;&nbsp;Throttle PWM=" + String(PWM_throttle) + "<br>";
+          myMsg += GetParameters() + "<br><input class='mt-2 btn btn-primary' type=submit value='submit' />";
+          MakeWebPage(client, myMsg);
         }
       }
     }
@@ -367,265 +362,218 @@ void loopWiFi() {
     client.stop();
   }
 }
-void setTheValuesFromUserForm(WiFiClient client)
-{
-  String currentLine=""; UPONLYMODE=false;
-  while (client.connected())
-  {            // loop while the client's connected
-    if (client.available()) {             // if there's bytes to read from the client,
-      char c = client.read();             // read a byte, then
-      if (c == '\n') {                   
+void setTheValuesFromUserForm(WiFiClient client) {
+  String currentLine = "";
+  UPONLYMODE = false;
+  while (client.connected()) {  // loop while the client's connected
+    if (client.available()) {   // if there's bytes to read from the client,
+      char c = client.read();   // read a byte, then
+      if (c == '\n') {
         // if the current line is blank, you got two newline characters in a row.
         // that's the end of the client HTTP request, so send a response:
         if (currentLine.length() == 0) {
           break;
-        } else {    // if you got a newline, then clear currentLine:
+        } else {  // if you got a newline, then clear currentLine:
           currentLine = "";
         }
       } else if (c != '\r') {  // if you got anything else but a carriage return character,
         currentLine += c;      // add it to the end of the currentLine
       }
-      if (currentLine.endsWith("maxMotor="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("maxMotor=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          maxMotor=myValue.toFloat();          
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        maxMotor = myValue.toFloat();
       }
-      if (currentLine.endsWith("rate="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("rate=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          rate=myValue.toFloat();          
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        rate = myValue.toFloat();
       }
-      if (currentLine.endsWith("minThrottle="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("stick_dampener=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          minThrottle=myValue.toFloat();          
-      }
-      if (currentLine.endsWith("stick_dampener="))
-      {
-          String myValue="";
-
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          stick_dampener=myValue.toFloat();          
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        stick_dampener = myValue.toFloat();
       }
 
-      if (currentLine.endsWith("i_limit="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("i_limit=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          i_limit=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        i_limit = myValue.toFloat();
       }
-      if (currentLine.endsWith("Accel_filter="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("Accel_filter=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Accel_filter=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Accel_filter = myValue.toFloat();
       }
-      if (currentLine.endsWith("Gyro_filter="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("Gyro_filter=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Gyro_filter=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Gyro_filter = myValue.toFloat();
       }
 
-      if (currentLine.endsWith("UPONLYMODE="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("UPONLYMODE=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          if (myValue=="true") UPONLYMODE=true; else UPONLYMODE=false;
-      }      
-
-      if (currentLine.endsWith("kp_roll_angle="))
-      {
-          String myValue="";
-
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kp_roll_angle=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        if (myValue == "true") UPONLYMODE = true;
+        else UPONLYMODE = false;
       }
 
-      if (currentLine.endsWith("ki_roll_angle="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("kp_roll_angle=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Ki_roll_angle=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Kp_roll_angle = myValue.toFloat();
       }
-      if (currentLine.endsWith("kd_roll_angle="))
-      {
-          String myValue="";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kd_roll_angle=myValue.toFloat();
+      if (currentLine.endsWith("ki_roll_angle=")) {
+        String myValue = "";
+
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Ki_roll_angle = myValue.toFloat();
       }
-    
+      if (currentLine.endsWith("kd_roll_angle=")) {
+        String myValue = "";
+
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Kd_roll_angle = myValue.toFloat();
+      }
+
       //
-      if (currentLine.endsWith("kp_pitch_angle="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("kp_pitch_angle=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kp_pitch_angle=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Kp_pitch_angle = myValue.toFloat();
       }
-      if (currentLine.endsWith("ki_pitch_angle="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("ki_pitch_angle=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Ki_pitch_angle=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Ki_pitch_angle = myValue.toFloat();
       }
-      if (currentLine.endsWith("kd_pitch_angle="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("kd_pitch_angle=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kd_pitch_angle=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Kd_pitch_angle = myValue.toFloat();
       }
       //yaw
-      if (currentLine.endsWith("kp_yaw="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("kp_yaw=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kp_yaw=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Kp_yaw = myValue.toFloat();
       }
-      if (currentLine.endsWith("ki_yaw="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("ki_yaw=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Ki_yaw=myValue.toFloat();
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Ki_yaw = myValue.toFloat();
       }
-      if (currentLine.endsWith("kd_yaw="))
-      {
-          String myValue="";
+      if (currentLine.endsWith("kd_yaw=")) {
+        String myValue = "";
 
-          while (!currentLine.endsWith("&"))
-          {
-            c = client.read();
-            if (c!='&') myValue+=c;
-            currentLine+=c;
-          }
-          Kd_yaw=myValue.toFloat();
-          return;
+        while (!currentLine.endsWith("&")) {
+          c = client.read();
+          if (c != '&') myValue += c;
+          currentLine += c;
+        }
+        Kd_yaw = myValue.toFloat();
+        return;
       }
-
-    }  
+    }
   }
 }
 
-String GetParameters()
-{
+String GetParameters() {
   String myString;
-  myString=myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=number step=.001 name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
-  myString=myString + "<tr><td>Motor Change Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=rate style='width:70px;' value='" + String(rate) + "'></td></tr>";
-  myString=myString + "<tr><td>Min Throttle Reduction (0.0-1.0):</td><td><input type=number step=.001 name=minThrottle style='width:70px;' value='" + String(minThrottle) + "'></td></tr>";
-  myString=myString + "<tr><td>Stick Dampening (0.01-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=stick_dampener style='width:70px;' value='" + String(stick_dampener) + "'></td></tr>";
-  myString=myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=number step=.001 name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr>";
-  myString=myString + "<tr><td>Accel Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Accel_filter style='width:70px;' value='" + String(Accel_filter) + "'></td></tr>";
-  myString=myString + "<tr><td>Gyro Dampening (0.1-1.0 ):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Gyro_filter style='width:70px;' value='" + String(Gyro_filter) + "'></td></tr>";
+  myString = myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=number step=.001 name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
+  myString = myString + "<tr><td>Motor Change Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=rate style='width:70px;' value='" + String(rate) + "'></td></tr>";
+  myString = myString + "<tr><td>Stick Dampening (0.01-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=stick_dampener style='width:70px;' value='" + String(stick_dampener) + "'></td></tr>";
+  myString = myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=number step=.001 name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr>";
+  myString = myString + "<tr><td>Accel Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Accel_filter style='width:70px;' value='" + String(Accel_filter) + "'></td></tr>";
+  myString = myString + "<tr><td>Gyro Dampening (0.1-1.0 ):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Gyro_filter style='width:70px;' value='" + String(Gyro_filter) + "'></td></tr>";
   String myVal;
-  if (!UPONLYMODE) myVal=""; else myVal="checked";
-  myString=myString + "<tr><td>Up Mode Only:</td><td><input type=CHECKBOX name=UPONLYMODE value='true' " + (myVal) + "></td></tr>";
-  myString=myString + "</table>";
-  myString=myString + "<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
-  myString=myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=number step=.001 value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=number step=.001 value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=number step=.001 style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
-  myString=myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=number step=.001 value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=number step=.001 value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=number step=.001 style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
-  myString=myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=number step=.001 style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=number step=.001 name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=number step=.001 name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'></td></tr><input type=hidden name=ender value='0'>";
-  myString=myString + "</table><br>Tip: To use your parameters beyond this flight session, snapshot the screen for reference and update the code.<br>";
+  if (!UPONLYMODE) myVal = "";
+  else myVal = "checked";
+  myString = myString + "<tr><td>Up Mode Only:</td><td><input type=CHECKBOX name=UPONLYMODE value='true' " + (myVal) + "></td></tr>";
+  myString = myString + "</table>";
+  myString = myString + "<table class=table><thead class=thead-dark><th></th><th>Kp</th><th>Ki</th><th>Kd</th></thead>";
+  myString = myString + "<tr><td>Roll:</td><td><input name=kp_roll_angle style='width:70px;' type=number step=.001 value='" + String(Kp_roll_angle) + "'></td><td><input style='width:70px;' name=ki_roll_angle type=number step=.001 value='" + String(Ki_roll_angle) + "'></td><td><input name=kd_roll_angle type=number step=.001 style='width:70px;' value='" + String(Kd_roll_angle) + "'></td></tr>";
+  myString = myString + "<tr><td>Pitch:</td><td><input name=kp_pitch_angle  style='width:70px;' type=number step=.001 value='" + String(Kp_pitch_angle) + "'></td><td><input  style='width:70px;' name=ki_pitch_angle type=number step=.001 value='" + String(Ki_pitch_angle) + "'></td><td><input name=kd_pitch_angle type=number step=.001 style='width:70px;' value='" + String(Kd_pitch_angle) + "'></td></tr>";
+  myString = myString + "<tr><td>Yaw:</td><td><input name=kp_yaw type=number step=.001 style='width:70px;' value='" + String(Kp_yaw) + "'></td><td><input  style='width:70px;' type=number step=.001 name=ki_yaw value='" + String(Ki_yaw) + "'></td><td><input type=number step=.001 name=kd_yaw style='width:70px;' value='" + String(Kd_yaw) + "'></td></tr><input type=hidden name=ender value='0'>";
+  myString = myString + "</table><br>Tip: To use your parameters beyond this flight session, snapshot the screen for reference and update the code.<br>";
   return myString;
 }
 
-void MakeWebPage(WiFiClient client, String html)
-{
+void MakeWebPage(WiFiClient client, String html) {
   // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
   // and a content-type so the client knows what's coming, then a blank line:
   client.println("HTTP/1.1 200 OK");
@@ -644,18 +592,17 @@ void MakeWebPage(WiFiClient client, String html)
   client.print(tuningProcedure());
   client.print("</div></form>");
   client.print("<script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js\" integrity=\"sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p\" crossorigin=\"anonymous\"></script>");
-  client.println(); // The HTTP response ends with another blank line:
+  client.println();  // The HTTP response ends with another blank line:
 }
 
-void tick()
-{
+void tick() {
   //Keep track of what time it is and how much time has elapsed since the last loop
   prev_time = current_time;
   current_time = micros();
-  deltaTime = (current_time - prev_time)/1000000.0; //division takes it from micros to seconds.  1000000 ms=1 second
+  deltaTime = (current_time - prev_time) / 1000000.0;  //division takes it from micros to seconds.  1000000 ms=1 second
 }
 //========================================================================================================================//
-//                                                      FUNCTIONS                                                         //                           
+//                                                      FUNCTIONS                                                         //
 //========================================================================================================================//
 
 void controlMixer() {
@@ -664,75 +611,71 @@ void controlMixer() {
    * Takes roll_PID, pitch_PID, and yaw_PID computed from the PID controller and appropriately mixes them for the desired
    * vehicle configuration. For example on a quadcopter, the left two motors should have +roll_PID while the right two motors
    * should have -roll_PID. Front two should have -pitch_PID and the back two should have +pitch_PID etc... every motor has
-   * normalized (0 to 1) thro_des command for throttle control. Can also apply direct unstabilized commands from the transmitter with 
-   * roll_passthru, pitch_passthru, and yaw_passthu. mX_command_scaled and sX_command scaled variables are used in scaleCommands() 
-   * in preparation to be sent to the motor ESCs
+   * normalized (0 to 1) thro_des command for throttle control.
    * 
    *Relevant variables:
    *thro_des - direct thottle control
-   *roll_PID, pitch_PID, yaw_PID - stabilized axis variables
-   *roll_passthru, pitch_passthru, yaw_passthru - direct unstabilized command passthrough
+   *roll_PID, pitch_PID, yaw_PID - stabilized axis variables  
    */
-   
-  //Quad mixing
-  m1_command_scaled = maxMotor*(thro_des - pitch_PID + roll_PID + yaw_PID); //Front left
-  m2_command_scaled = maxMotor*(thro_des - pitch_PID - roll_PID - yaw_PID); //Front right
-  m3_command_scaled = maxMotor*(thro_des + pitch_PID - roll_PID + yaw_PID); //Back Right
-  m4_command_scaled = maxMotor*(thro_des + pitch_PID + roll_PID - yaw_PID); //Back Left
- 
-  float minimum=thro_des*minThrottle;
 
-  m1_command_scaled=constrain(m1_command_scaled,minimum,maxMotor);
-  m2_command_scaled=constrain(m2_command_scaled,minimum,maxMotor);
-  m3_command_scaled=constrain(m3_command_scaled,minimum,maxMotor);
-  m4_command_scaled=constrain(m4_command_scaled,minimum,maxMotor);
+  //Quad mixing. maxMotor is used to keep the motors from being too violent if you have a big battery and concers about that.
+  m1_command_scaled = maxMotor * (thro_des)-pitch_PID + roll_PID + yaw_PID;    //Front left
+  m2_command_scaled = maxMotor * (thro_des)-pitch_PID - roll_PID - yaw_PID;    //Front right
+  m3_command_scaled = maxMotor * (thro_des) + pitch_PID - roll_PID + yaw_PID;  //Back Right
+  m4_command_scaled = maxMotor * (thro_des) + pitch_PID + roll_PID - yaw_PID;  //Back Left
 
-  m1_command_scaled=(1-rate)*m1_previous + rate*m1_command_scaled;
-  m2_command_scaled=(1-rate)*m2_previous + rate*m2_command_scaled;
-  m3_command_scaled=(1-rate)*m3_previous + rate*m3_command_scaled;
-  m4_command_scaled=(1-rate)*m4_previous + rate*m4_command_scaled;
+  m1_command_scaled = constrain(m1_command_scaled, 0, maxMotor);
+  m2_command_scaled = constrain(m2_command_scaled, 0, maxMotor);
+  m3_command_scaled = constrain(m3_command_scaled, 0, maxMotor);
+  m4_command_scaled = constrain(m4_command_scaled, 0, maxMotor);
 
-  m1_previous=m1_command_scaled;
-  m2_previous=m2_command_scaled;
-  m3_previous=m3_command_scaled;
-  m4_previous=m4_command_scaled;
+  m1_command_scaled = (1 - rate) * m1_previous + rate * m1_command_scaled;
+  m2_command_scaled = (1 - rate) * m2_previous + rate * m2_command_scaled;
+  m3_command_scaled = (1 - rate) * m3_previous + rate * m3_command_scaled;
+  m4_command_scaled = (1 - rate) * m4_previous + rate * m4_command_scaled;
+
+  m1_previous = m1_command_scaled;
+  m2_previous = m2_command_scaled;
+  m3_previous = m3_command_scaled;
+  m4_previous = m4_command_scaled;
 }
 
 void IMUinit() {
   //DESCRIPTION: Initialize IMU
-  if (!IMU.begin()) {  
-    while (true) ;
-  }  
+  if (!IMU.begin()) {
+    while (true)
+      ;
+  }
   delay(15);
 }
 
 void getIMUdata() {
-  //DESCRIPTION: Request full dataset from IMU and LP filter gyro, accelerometer, and magnetometer data
- //Accelerometer
- 
+  //DESCRIPTION: Request full dataset from IMU
+
+  //Accelerometer
   if (IMU.accelerationAvailable()) {
     IMU.readAcceleration(AccX, AccY, AccZ);
     AccX = AccX - AccErrorX;
     AccY = AccY - AccErrorY;
     AccY = AccY - AccErrorZ;
     //Correct the outputs with the calculated error values
-    AccX = (1.0 - Accel_filter)*AccX_prev + Accel_filter*AccX;
-    AccY = (1.0 - Accel_filter)*AccY_prev + Accel_filter*AccY;
-    AccZ = (1.0 - Accel_filter)*AccZ_prev + Accel_filter*AccZ;
+    AccX = (1.0 - Accel_filter) * AccX_prev + Accel_filter * AccX;
+    AccY = (1.0 - Accel_filter) * AccY_prev + Accel_filter * AccY;
+    AccZ = (1.0 - Accel_filter) * AccZ_prev + Accel_filter * AccZ;
     AccX_prev = AccX;
     AccY_prev = AccY;
     AccZ_prev = AccZ;
   } else return;
   if (IMU.gyroscopeAvailable()) {
-  //Gyro
+    //Gyro
     IMU.readGyroscope(GyroX, GyroY, GyroZ);
     //Correct the outputs with the calculated error values
     GyroX = GyroX - GyroErrorX;
     GyroY = GyroY - GyroErrorY;
     GyroZ = GyroZ - GyroErrorZ;
-    GyroX = (1.0 -Gyro_filter)*GyroX_prev +Gyro_filter*GyroX;
-    GyroY = (1.0 -Gyro_filter)*GyroY_prev +Gyro_filter*GyroY;
-    GyroZ = (1.0 -Gyro_filter)*GyroZ_prev +Gyro_filter*GyroZ;
+    GyroX = (1.0 - Gyro_filter) * GyroX_prev + Gyro_filter * GyroX;
+    GyroY = (1.0 - Gyro_filter) * GyroY_prev + Gyro_filter * GyroY;
+    GyroZ = (1.0 - Gyro_filter) * GyroZ_prev + Gyro_filter * GyroZ;
     GyroX_prev = GyroX;
     GyroY_prev = GyroY;
     GyroZ_prev = GyroZ;
@@ -742,38 +685,41 @@ void getIMUdata() {
 void calculate_IMU_error() {
   //DESCRIPTION: Computes IMU accelerometer and gyro error on startup. Note: vehicle should be powered up on flat surface
   /*
-   * Don't worry too much about what this is doing. The error values it computes are applied to the raw gyro and 
-   * accelerometer values AccX, AccY, AccZ, GyroX, GyroY, GyroZ in getIMUdata(). This eliminates drift in the
-   * measurement.
+   * The error values it computes are applied to the raw gyro and 
+   * accelerometer values AccX, AccY, AccZ, GyroX, GyroY, GyroZ in getIMUdata().
+   * this will correct for drift in the sensor.
    */
-  float AcX,AcY,AcZ,GyX,GyY,GyZ;
-  
-  //Read IMU values 12000 times
-  int c = 0;
-  while (c < 12000) {
-    
+  float AcX, AcY, AcZ, GyX, GyY, GyZ;
+
+  Serial.println("Calculating IMU Error with 1000 iterations. Please stand by...");
+
+  //Read IMU values 1000 times.  Should take around 10 seconds at 104Hz IMU timing.
+  int c = 0;AccErrorX=0;AccErrorY=0;AccErrorZ=0;GyroErrorX=0;GyroErrorY=0;GyroErroZ=0;
+  while (c < 1000) {
+    while (!IMU.accelerationAvailable()&!IMU.gyroscopeAvailable()) delay(1);
     IMU.readAcceleration(AcX, AcY, AcZ);
     IMU.readGyroscope(GyX, GyY, GyZ);
-    AccX  = AcX;
-    AccY  = AcY;
-    AccZ  = AcZ;
+    AccX = AcX;
+    AccY = AcY;
+    AccZ = AcZ;
     GyroX = GyX;
     GyroY = GyY;
     GyroZ = GyZ;
-    
+
     //Sum all readings
-    AccErrorX  = AccErrorX + AccX;
-    AccErrorY  = AccErrorY + AccY;
-    AccErrorZ  = AccErrorZ + AccZ;
+    AccErrorX = AccErrorX + AccX;
+    AccErrorY = AccErrorY + AccY;
+    AccErrorZ = AccErrorZ + AccZ;
     GyroErrorX = GyroErrorX + GyroX;
     GyroErrorY = GyroErrorY + GyroY;
     GyroErrorZ = GyroErrorZ + GyroZ;
     c++;
+    Serial.println(c);
   }
   //Divide the sum by 12000 to get the error value
-  AccErrorX  = AccErrorX / c;
-  AccErrorY  = AccErrorY / c;
-  AccErrorZ  = AccErrorZ / c - 1.0;
+  AccErrorX = AccErrorX / c;
+  AccErrorY = AccErrorY / c;
+  AccErrorZ = AccErrorZ / c - 1.0;
   GyroErrorX = GyroErrorX / c;
   GyroErrorY = GyroErrorY / c;
   GyroErrorZ = GyroErrorZ / c;
@@ -787,7 +733,7 @@ void calculate_IMU_error() {
   Serial.print("float AccErrorZ = ");
   Serial.print(AccErrorZ);
   Serial.println(";");
-  
+
   Serial.print("float GyroErrorX = ");
   Serial.print(GyroErrorX);
   Serial.println(";");
@@ -799,7 +745,7 @@ void calculate_IMU_error() {
   Serial.println(";");
 
   Serial.println("Paste these values in user specified variables section and comment out calculate_IMU_error() in void setup.");
-  while(true) delay(1000);
+  while (true) delay(1000);
 }
 
 void calibrateAttitude() {
@@ -817,9 +763,8 @@ void calibrateAttitude() {
     tock();
   }
 }
-void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
-{
- //DESCRIPTION: Attitude estimation through sensor fusion - 6DOF
+void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az) {
+  //DESCRIPTION: Attitude estimation through sensor fusion - 6DOF
   /*
    * See description of Madgwick() for more information. This is a 6DOF implimentation for when magnetometer data is not
    * available (for example when using the recommended MPU6050 IMU for the default setup).
@@ -827,7 +772,7 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
   float recipNorm;
   float s0, s1, s2, s3;
   float qDot1, qDot2, qDot3, qDot4;
-  float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2 ,_8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
+  float _2q0, _2q1, _2q2, _2q3, _4q0, _4q1, _4q2, _8q1, _8q2, q0q0, q1q1, q2q2, q3q3;
 
   //Convert gyroscope degrees/sec to radians/sec
   gx *= 0.0174533f;
@@ -841,7 +786,7 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
   qDot4 = 0.5f * (q0 * gz + q1 * gy - q2 * gx);
 
   //Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-  if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
+  if (!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
     //Normalise accelerometer measurement
     recipNorm = invSqrt(ax * ax + ay * ay + az * az);
     ax *= recipNorm;
@@ -868,7 +813,7 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
     s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
     s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
     s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
-    recipNorm = invSqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3); //normalise step magnitude
+    recipNorm = invSqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);  //normalise step magnitude
     s0 *= recipNorm;
     s1 *= recipNorm;
     s2 *= recipNorm;
@@ -882,7 +827,7 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
   }
 
   //Integrate rate of change of quaternion to yield quaternion
-  
+
   q0 += qDot1 * deltaTime;
   q1 += qDot2 * deltaTime;
   q2 += qDot3 * deltaTime;
@@ -896,9 +841,9 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az)
   q3 *= recipNorm;
 
   //Compute angles
-  roll_IMU = atan2(q0*q1 + q2*q3, 0.5f - q1*q1 - q2*q2)*57.29577951; //degrees
-  pitch_IMU = -asin(-2.0f * (q1*q3 - q0*q2))*57.29577951; //degrees
-  yaw_IMU = -atan2(q1*q2 + q0*q3, 0.5f - q2*q2 - q3*q3)*57.29577951; //degrees
+  roll_IMU = atan2(q0 * q1 + q2 * q3, 0.5f - q1 * q1 - q2 * q2) * 57.29577951;  //degrees
+  pitch_IMU = -asin(-2.0f * (q1 * q3 - q0 * q2)) * 57.29577951;                 //degrees
+  yaw_IMU = -atan2(q1 * q2 + q0 * q3, 0.5f - q2 * q2 - q3 * q3) * 57.29577951;  //degrees
 }
 
 void getDesiredAnglesAndThrottle() {
@@ -906,26 +851,19 @@ void getDesiredAnglesAndThrottle() {
   /*
    * Updates the desired state variables thro_des, roll_des, pitch_des, and yaw_des. These are computed by using the raw
    * RC pwm commands and scaling them to be within our limits defined in setup. thro_des stays within 0 to 1 range.
-   * roll_des and pitch_des are scaled to be within max roll/pitch amount in either degrees (angle mode) or degrees/sec
-   * (rate mode). yaw_des is scaled to be within max yaw in degrees/sec. Also creates roll_passthru, pitch_passthru, and
-   * yaw_passthru variables, to be used in commanding motors/servos with direct unstabilized commands in controlMixer().
+   * roll_des and pitch_des are scaled to be within max roll/pitch amount in degrees
+   * (rate mode). yaw_des is scaled to be within max yaw in degrees/sec.
    */
-  thro_des = (PWM_throttle - 1000.0)/1000.0; //Between 0 and 1
-  roll_des = (PWM_roll - 1500.0)/500.0; //Between -1 and 1
-  pitch_des = (PWM_Elevation - 1500.0)/500.0; //Between -1 and 1
-  yaw_des = (PWM_Rudd - 1500.0)/500.0; //Between -1 and 1 
-  roll_passthru = roll_des/2.0; //Between -0.5 and 0.5
-  pitch_passthru = pitch_des/2.0; //Between -0.5 and 0.5
-  yaw_passthru = yaw_des/2.0; //Between -0.5 and 0.5
-  
+  thro_des = (PWM_throttle - 1000.0) / 1000.0;   //Between 0 and 1
+  roll_des = (PWM_roll - 1500.0) / 500.0;        //Between -1 and 1
+  pitch_des = (PWM_Elevation - 1500.0) / 500.0;  //Between -1 and 1
+  yaw_des = (PWM_Rudd - 1500.0) / 500.0;         //Between -1 and 1
+
   //Constrain within normalized bounds
-  thro_des = constrain(thro_des, 0.0, 1.0); //Between 0 and 1
-  roll_des = constrain(roll_des, -1.0, 1.0)*maxRoll; //Between -maxRoll and +maxRoll
-  pitch_des = constrain(pitch_des, -1.0, 1.0)*maxPitch; //Between -maxPitch and +maxPitch
-  yaw_des = constrain(yaw_des, -1.0, 1.0)*maxYaw; //Between -maxYaw and +maxYaw
-  roll_passthru = constrain(roll_passthru, -0.5, 0.5);
-  pitch_passthru = constrain(pitch_passthru, -0.5, 0.5);
-  yaw_passthru = constrain(yaw_passthru, -0.5, 0.5);
+  thro_des = constrain(thro_des, 0.0, 1.0);                //Between 0 and 1
+  roll_des = constrain(roll_des, -1.0, 1.0) * maxRoll;     //Between -maxRoll and +maxRoll
+  pitch_des = constrain(pitch_des, -1.0, 1.0) * maxPitch;  //Between -maxPitch and +maxPitch
+  yaw_des = constrain(yaw_des, -1.0, 1.0) * maxYaw;        //Between -maxYaw and +maxYaw
 }
 
 void PIDControlCalcs() {
@@ -940,46 +878,46 @@ void PIDControlCalcs() {
    * terms will always start from 0 on takeoff. This function updates the variables roll_PID, pitch_PID, and yaw_PID which
    * can be thought of as 1-D stablized signals. They are mixed to the configuration of the vehicle in controlMixer().
    */
-  
+
   //Roll
-  if (UPONLYMODE) roll_des=0;
-  
+  if (UPONLYMODE) roll_des = 0;
+
   error_roll = roll_des - roll_IMU;
-  integral_roll = integral_roll_prev + error_roll*deltaTime;
-  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
+  integral_roll = integral_roll_prev + error_roll * deltaTime;
+  if (PWM_throttle < 1100) {  //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
 
-  integral_roll = constrain(integral_roll, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
-  derivative_roll = GyroX; //(roll_des-roll_IMU-roll_des-previous_IMU)/dt=current angular velocity since last IMU read and therefore GyroX in deg/s
-  roll_PID = 0.01*(Kp_roll_angle*error_roll + Ki_roll_angle*integral_roll - Kd_roll_angle*derivative_roll); //Scaled by .01 to bring within -1 to 1 range
+  integral_roll = constrain(integral_roll, -i_limit, i_limit);                                                       //Saturate integrator to prevent unsafe buildup
+  derivative_roll = GyroX;                                                                                           //(roll_des-roll_IMU-roll_des-previous_IMU)/dt=current angular velocity since last IMU read and therefore GyroX in deg/s
+  roll_PID = 0.01 * (Kp_roll_angle * error_roll + Ki_roll_angle * integral_roll - Kd_roll_angle * derivative_roll);  //Scaled by .01 to bring within -1 to 1 range
 
   //Pitch
-  if (UPONLYMODE) pitch_des=0;
+  if (UPONLYMODE) pitch_des = 0;
   error_pitch = pitch_des - pitch_IMU;
-  
-  integral_pitch = integral_pitch_prev + error_pitch*deltaTime;
-  
-  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is probably not sufficient to lift off ground
+
+  integral_pitch = integral_pitch_prev + error_pitch * deltaTime;
+
+  if (PWM_throttle < 1100) {  //Don't let integrator build if throttle is probably not sufficient to lift off ground
     integral_pitch = 0;
   }
-  integral_pitch = constrain(integral_pitch, -i_limit, i_limit); //Limit integrator to prevent unsafe buildup
-  
+  integral_pitch = constrain(integral_pitch, -i_limit, i_limit);  //Limit integrator to prevent unsafe buildup
+
   derivative_pitch = GyroY;
 
-  pitch_PID = .01*(Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch); //Scaled by .01 to bring within -1 to 1 range
-  
+  pitch_PID = .01 * (Kp_pitch_angle * error_pitch + Ki_pitch_angle * integral_pitch - Kd_pitch_angle * derivative_pitch);  //Scaled by .01 to bring within -1 to 1 range
+
   //Yaw, stablize on rate from GyroZ versus angle.  In other words, your stick is setting y axis rotation speed - not the angle to get to.
   error_yaw = yaw_des - GyroZ;
-  integral_yaw = integral_yaw_prev + error_yaw*deltaTime;
-  if (PWM_throttle < 1060) {   //Don't let integrator build if throttle is too low
+  integral_yaw = integral_yaw_prev + error_yaw * deltaTime;
+  if (PWM_throttle < 1100) {  //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
-  integral_yaw = constrain(integral_yaw, -i_limit, i_limit); //Saturate integrator to prevent unsafe buildup
-  derivative_yaw = (error_yaw - error_yaw_prev)/deltaTime; 
-  yaw_PID = .01*(Kp_yaw*error_yaw + Ki_yaw*integral_yaw + Kd_yaw*derivative_yaw); //Scaled by .01 to bring within -1 to 1 range
-  
-  if (UPONLYMODE) yaw_PID=0;
+  integral_yaw = constrain(integral_yaw, -i_limit, i_limit);  //Saturate integrator to prevent unsafe buildup
+  derivative_yaw = (error_yaw - error_yaw_prev) / deltaTime;
+  yaw_PID = .01 * (Kp_yaw * error_yaw + Ki_yaw * integral_yaw + Kd_yaw * derivative_yaw);  //Scaled by .01 to bring within -1 to 1 range
+
+  if (UPONLYMODE) yaw_PID = 0;
   //Update roll variables
   integral_roll_prev = integral_roll;
   //Update pitch variables
@@ -995,10 +933,10 @@ void scaleCommands() {
    * The actual pulse width is set at the servo attach.
    */
   //Constrain commands to motors within PWM 0-180 degrees for Servo PWM.
-  m1_command_PWM = m1_command_scaled*180;
-  m2_command_PWM = m2_command_scaled*180;
-  m3_command_PWM = m3_command_scaled*180;
-  m4_command_PWM = m4_command_scaled*180;
+  m1_command_PWM = m1_command_scaled * 180;
+  m2_command_PWM = m2_command_scaled * 180;
+  m3_command_PWM = m3_command_scaled * 180;
+  m4_command_PWM = m4_command_scaled * 180;
 
   m1_command_PWM = constrain(m1_command_PWM, 0, 180);
   m2_command_PWM = constrain(m2_command_PWM, 0, 180);
@@ -1014,36 +952,34 @@ void getRadioSticks() {
    * The raw radio commands are filtered with a first order low-pass filter to eliminate any really high frequency noise. 
    */
 
-    PWM_throttle = getRadioPWM(1);
-    PWM_roll = getRadioPWM(2);
-    PWM_Elevation = getRadioPWM(3);
-    PWM_Rudd = getRadioPWM(4);
-    PWM_ThrottleCutSwitch = getRadioPWM(5);
+  PWM_throttle = getRadioPWM(1);
+  PWM_roll = getRadioPWM(2);
+  PWM_Elevation = getRadioPWM(3);
+  PWM_Rudd = getRadioPWM(4);
+  PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
-  if (PWM_throttle_prev-PWM_throttle>0) {
-    PWM_throttle = (1.0 - stick_dampener)*PWM_throttle_prev + stick_dampener*PWM_throttle;
-  } else
-  { //go down slower than up
-    PWM_throttle = (stick_dampener)*PWM_throttle_prev + (1-stick_dampener)*PWM_throttle;
+  if (PWM_throttle_prev - PWM_throttle > 0) {
+    PWM_throttle = (1.0 - stick_dampener) * PWM_throttle_prev + stick_dampener * PWM_throttle;
+  } else {  //go down slower than up
+    PWM_throttle = (stick_dampener)*PWM_throttle_prev + (1 - stick_dampener) * PWM_throttle;
   }
-  PWM_roll = (1.0 - stick_dampener)*PWM_roll_prev + stick_dampener*PWM_roll;
-  PWM_Elevation = (1.0 - stick_dampener)*PWM_Elevation_prev + stick_dampener*PWM_Elevation;
-  PWM_Rudd = (1.0 - stick_dampener)*PWM_Rudd_prev + stick_dampener*PWM_Rudd;
+  PWM_roll = (1.0 - stick_dampener) * PWM_roll_prev + stick_dampener * PWM_roll;
+  PWM_Elevation = (1.0 - stick_dampener) * PWM_Elevation_prev + stick_dampener * PWM_Elevation;
+  PWM_Rudd = (1.0 - stick_dampener) * PWM_Rudd_prev + stick_dampener * PWM_Rudd;
 
   PWM_throttle_prev = PWM_throttle;
-  PWM_roll_prev =PWM_roll;
+  PWM_roll_prev = PWM_roll;
   PWM_Elevation_prev = PWM_Elevation;
   PWM_Rudd_prev = PWM_Rudd;
-  
 }
-void setToFailsafe()
-{
+
+void setToFailsafe() {
   PWM_throttle = PWM_throttle_fs;
   PWM_roll = PWM_roll_fs;
   PWM_Elevation = PWM_elevation_fs;
   PWM_Rudd = PWM_rudd_fs;
-  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs; //this is so the throttle cut routine doesn't override the fail safes.
+  PWM_ThrottleCutSwitch = PWM_ThrottleCutSwitch_fs;  //this is so the throttle cut routine doesn't override the fail safes.
 }
 
 void failSafe() {
@@ -1055,21 +991,21 @@ void failSafe() {
    * channel_x_pwm are set to default failsafe values specified in the setup. Comment out this function when troubleshooting 
    * your radio connection in case any extreme values are triggering this function to overwrite the printed variables.
    */
-  
+
 
   //Triggers for failure criteria
   //unsigned minVal = 800;
   //unsigned maxVal = 2200;
-  //if (PWM_ThrottleCutSwitch>maxVal || PWM_ThrottleCutSwitch<minVal || PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal) 
-  
-  
-  if (PWM_throttle < 800 || PWM_throttle > 2200) //this is the less conservative version to get through this routine faster.
+  //if (PWM_ThrottleCutSwitch>maxVal || PWM_ThrottleCutSwitch<minVal || PWM_throttle > maxVal || PWM_throttle < minVal || PWM_roll > maxVal ||PWM_roll < minVal || PWM_Elevation > maxVal || PWM_Elevation < minVal || PWM_Rudd > maxVal || PWM_Rudd < minVal)
+
+
+  if (PWM_throttle < 800 || PWM_throttle > 2200)  //this is the less conservative version to get through this routine faster.
   {
-    failsafed=true;
+    failsafed = true;
     setToFailsafe();
-  } else failsafed=false;
-  
-  if (EASYCHAIR) PWM_throttle=1500;//For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
+  } else failsafed = false;
+
+  if (EASYCHAIR) PWM_throttle = 1500;  //For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
 }
 
 void commandMotors() {
@@ -1108,44 +1044,42 @@ void throttleCut() {
    */
   if (EASYCHAIR) {
     //This is set above in compiler directives for when you are testing the Arduino outside of the drone.
-    throttle_is_cut=false;
+    throttle_is_cut = false;
     return;
   }
-  if (throttle_is_cut) killMotors(); //make sure we keep those motors at 0 if the throttle was cut.
+  if (throttle_is_cut) killMotors();  //make sure we keep those motors at 0 if the throttle was cut.
 
-  if (PWM_ThrottleCutSwitch < 1300) { 
+  if (PWM_ThrottleCutSwitch < 1300) {
     //throttleCutCounter will ensure it is not just a blip that has caused a false cut.
-    if (++throttleCutCounter>20) killMotors(); 
-    return;    
+    if (++throttleCutCounter > 20) killMotors();
+    return;
   }
-  if (throttle_is_cut&&PWM_ThrottleCutSwitch>1500)
-  { 
-    //reset only if throttle is down to prevent a jolting suprise 
-    if (PWM_throttle<1040&&++throttleNotCutCounter>20){  
-      throttle_is_cut=false;
-      throttleNotCutCounter=0;
-      throttleCutCounter=0;
+  if (throttle_is_cut && PWM_ThrottleCutSwitch > 1500) {
+    //reset only if throttle is down to prevent a jolting suprise
+    if (PWM_throttle < 1040 && ++throttleNotCutCounter > 20) {
+      throttle_is_cut = false;
+      throttleNotCutCounter = 0;
+      throttleCutCounter = 0;
     } else killMotors();
     return;
   }
 
   //Handle when things are going upside down
-  if (roll_IMU>50||roll_IMU<-50||pitch_IMU>50||pitch_IMU<-50)
-  {
-    if (++throttleCutCounter>10) killMotors(); 
+  if (roll_IMU > 45 || roll_IMU < -45 || pitch_IMU > 45 || pitch_IMU < -45) {
+    if (++throttleCutCounter > 8) killMotors();
     return;
   }
-  throttleNotCutCounter=0;
-
+  throttleNotCutCounter = 0;
+  throttleCutCounter = 0;
 }
 
-void killMotors(){
+void killMotors() {
   //sets the PWM to its lowest value to shut off a motor such as whne the throttle cut switch is fliped.
-    throttle_is_cut=true;    
-    m1_command_PWM = 0;
-    m2_command_PWM = 0;
-    m3_command_PWM = 0;
-    m4_command_PWM = 0;
+  throttle_is_cut = true;
+  m1_command_PWM = 0;
+  m2_command_PWM = 0;
+  m3_command_PWM = 0;
+  m4_command_PWM = 0;
 }
 
 void tock() {
@@ -1155,7 +1089,7 @@ void tock() {
    * background cause the loop rate to fluctuate. This function basically just waits at the end of every loop iteration until 
    * the correct time has passed since the start of the current loop for the desired loop rate in Hz. I have matched 
    * it just below the Gyro update frequency.  invFreq is set at the top of the code.
-   */  
+   */
   //Sit in loop until appropriate time has passed while checking for any WiFi client activity.
   while (invFreq > (micros() - current_time)) {
     if (ALLOW_WIFI) loopWiFi();
@@ -1215,8 +1149,8 @@ void printAccelData() {
     Serial.println(AccZ);
   }
 }
-void printJSON(){
-  if (current_time - print_counter > 34000) { //Don't go too fast or it slows down the main loop
+void printJSON() {
+  if (current_time - print_counter > 34000) {  //Don't go too fast or it slows down the main loop
     print_counter = micros();
     Serial.print(F("{\"roll\": "));
     Serial.print(roll_IMU);
@@ -1230,7 +1164,7 @@ void printJSON(){
     Serial.print(integral_roll);
     Serial.print(F(", \"DerivativeRoll\": "));
     Serial.print(derivative_roll);
-    
+
     Serial.print(F(", \"RollKp\": "));
     Serial.print(Kp_roll_angle);
     Serial.print(F(", \"RollKi\": "));
@@ -1246,7 +1180,7 @@ void printJSON(){
     Serial.print(m3_command_PWM);
     Serial.print(F(", \"m4\": "));
     Serial.print(m4_command_PWM);
-    
+
     Serial.print(F(", \"AccX\": "));
     Serial.print(AccX);
     Serial.print(F(", \"AccY\": "));
@@ -1297,9 +1231,9 @@ void printJSON(){
 
     Serial.print(F(", \"Failsafe\": "));
     Serial.print(failsafed);
-    
+
     Serial.print(F(", \"DeltaTime\": "));
-    Serial.print(deltaTime*1000000.0);
+    Serial.print(deltaTime * 1000000.0);
     Serial.println("}");
   }
 }
@@ -1346,7 +1280,7 @@ void printtock() {
   if (current_time - print_counter > 10000) {
     print_counter = micros();
     Serial.print(F("deltaTime = "));
-    Serial.println(deltaTime*1000000.0);
+    Serial.println(deltaTime * 1000000.0);
   }
 }
 
@@ -1354,44 +1288,39 @@ void printtock() {
 
 //This file contains all necessary functions and code used for radio communication to avoid cluttering the main code
 
-void radioSetup()
-{
-    //PWM Receiver
-    //Declare interrupt pins 
-    pinMode(throttlePin, INPUT_PULLUP);
-    pinMode(rollPin, INPUT_PULLUP);
-    pinMode(upDownPin, INPUT_PULLUP);
-    pinMode(ruddPin, INPUT_PULLUP);
-    pinMode(throttleCutSwitchPin, INPUT_PULLUP);
-    
-    delay(20);
-    //Attach interrupt and point to corresponding ISR functions
-    attachInterrupt(digitalPinToInterrupt(throttlePin), getCh1, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(rollPin), getCh2, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(upDownPin), getCh3, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ruddPin), getCh4, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(throttleCutSwitchPin), getCh5, CHANGE);
-    
-    delay(20);
+void radioSetup() {
+  //PWM Receiver
+  //Declare interrupt pins
+  pinMode(throttlePin, INPUT_PULLUP);
+  pinMode(rollPin, INPUT_PULLUP);
+  pinMode(upDownPin, INPUT_PULLUP);
+  pinMode(ruddPin, INPUT_PULLUP);
+  pinMode(throttleCutSwitchPin, INPUT_PULLUP);
+
+  delay(20);
+  //Attach interrupt and point to corresponding ISR functions
+  attachInterrupt(digitalPinToInterrupt(throttlePin), getCh1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(rollPin), getCh2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(upDownPin), getCh3, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ruddPin), getCh4, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(throttleCutSwitchPin), getCh5, CHANGE);
+
+  delay(20);
 }
 
 unsigned long getRadioPWM(int ch_num) {
-  //DESCRIPTION: Get current radio commands from interrupt routines 
+  //DESCRIPTION: Get current radio commands from interrupt routines
   unsigned long returnPWM = 0;
-  
+
   if (ch_num == 1) {
     returnPWM = channel_1_raw;
-  }
-  else if (ch_num == 2) {
+  } else if (ch_num == 2) {
     returnPWM = channel_2_raw;
-  }
-  else if (ch_num == 3) {
+  } else if (ch_num == 3) {
     returnPWM = channel_3_raw;
-  }
-  else if (ch_num == 4) {
+  } else if (ch_num == 4) {
     returnPWM = channel_4_raw;
-  }
-  else if (ch_num == 5) {
+  } else if (ch_num == 5) {
     returnPWM = channel_5_raw;
   }
   return returnPWM;
@@ -1403,56 +1332,50 @@ unsigned long getRadioPWM(int ch_num) {
 
 void getCh1() {
   int trigger = digitalRead(throttlePin);
-  if(trigger == 1) {
+  if (trigger == 1) {
     rising_edge_start_1 = micros();
-  }
-  else if(trigger == 0) {
+  } else if (trigger == 0) {
     channel_1_raw = micros() - rising_edge_start_1;
   }
 }
 
 void getCh2() {
   int trigger = digitalRead(rollPin);
-  if(trigger == 1) {
+  if (trigger == 1) {
     rising_edge_start_2 = micros();
-  }
-  else if(trigger == 0) {
+  } else if (trigger == 0) {
     channel_2_raw = micros() - rising_edge_start_2;
   }
 }
 
 void getCh3() {
   int trigger = digitalRead(upDownPin);
-  if(trigger == 1) {
+  if (trigger == 1) {
     rising_edge_start_3 = micros();
-  }
-  else if(trigger == 0) {
+  } else if (trigger == 0) {
     channel_3_raw = micros() - rising_edge_start_3;
   }
 }
 
 void getCh4() {
   int trigger = digitalRead(ruddPin);
-  if(trigger == 1) {
+  if (trigger == 1) {
     rising_edge_start_4 = micros();
-  }
-  else if(trigger == 0) {
+  } else if (trigger == 0) {
     channel_4_raw = micros() - rising_edge_start_4;
   }
 }
 
 void getCh5() {
   int trigger = digitalRead(throttleCutSwitchPin);
-  if(trigger == 1) {
+  if (trigger == 1) {
     rising_edge_start_5 = micros();
-  }
-  else if(trigger == 0) {
+  } else if (trigger == 0) {
     channel_5_raw = micros() - rising_edge_start_5;
   }
 }
 
-String tuningProcedure()
-{
+String tuningProcedure() {
   return "<hr><h3><b>Ziegler-Nichols</b></h3>  <p>The Ziegler-Nichols tuning method is one of the most famous ways to experimentally tune a PID controller. The basic algorithm is as follows:</p><ol><li>Turn off the Integral and Derivative components for the controller; only use Proportional control.</li><li>Slowly increase the gain (i.e. <em>K<sub>p</sub></em>, the Proportion constant) until the process starts to oscillate<br />This final gain value is known as the ultimate gain, or <em>K<sub>u</sub></em><br />The period of oscillation is the ultimate period, or <em>T<sub>u</sub></em></li><li>Use the following table to derive the PID variables</li></ol></div></div><div class=\"sqs-block code-block sqs-block-code\" data-block-type=\"23\" id=\"block-yui_3_17_2_1_1598301478634_207710\"><div class=\"sqs-block-content\"><style type=\"text/css\">.tg  {border-collapse:collapse;border-spacing:0;}.tg td{border-color:black;border-style:solid;border-width:1px;  overflow:hidden;padding:10px 5px;word-break:normal;}.tg th{border-color:black;border-style:solid;border-width:1px;  font-weight:normal;overflow:hidden;padding:10px 5px;word-break:normal;}.tg .tg-gr1d{background-color:#e9f4fc;border-color:#337494;font-weight:bold;text-align:left;vertical-align:top}.tg .tg-m4ds{border-color:#337494;text-align:center;vertical-align:top}.tg .tg-bxxa{border-color:#337494;text-align:left;vertical-align:top}.tg .tg-hk19{background-color:#e9f4fc;border-color:#337494;font-weight:bold;text-align:center;vertical-align:top}.tg .tg-vaq8{background-color:#e9f4fc;border-color:#337494;text-align:left;vertical-align:top}.tg .tg-e1cu{background-color:#e9f4fc;border-color:#337494;text-align:center;vertical-align:top}</style><table class=\"table\"><thead>  <tr>    <th class=\"tg-gr1d\">Controller</th>    <th class=\"tg-hk19\">K<sub>p</sub></th>    <th class=\"tg-hk19\">T<sub>i</sub></th>    <th class=\"tg-hk19\">T<sub>d</sub></th>  </tr></thead><tbody>  <tr>    <td class=\"tg-bxxa\">P</td>    <td class=\"tg-m4ds\">K<sub>u</sub>/2</td>    <td class=\"tg-m4ds\"></td>    <td class=\"tg-m4ds\"></td>  </tr>  <tr>    <td class=\"tg-vaq8\">PI</td>    <td class=\"tg-e1cu\">K<sub>u</sub>/2.5</td>    <td class=\"tg-e1cu\">T<sub>u</sub>/1.25</td>    <td class=\"tg-e1cu\"></td>  </tr>  <tr>    <td class=\"tg-bxxa\">PID</td>    <td class=\"tg-m4ds\">0.6K<sub>u</sub></td>    <td class=\"tg-m4ds\">T<sub>u</sub>/2</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/8</td>  </tr>  <tr>    <td class=\"tg-vaq8\">Pessen Integral Rule<br></td>    <td class=\"tg-e1cu\">0.7K<sub>u</sub></td>    <td class=\"tg-e1cu\">0.4T<sub>u</sub></td>    <td class=\"tg-e1cu\">0.15T<sub>u</sub></td>  </tr>  <tr>    <td class=\"tg-bxxa\">Moderate overshoot</td>    <td class=\"tg-m4ds\">K<sub>u</sub>/3</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/2</td>    <td class=\"tg-m4ds\">T<sub>u</sub>/3</td>  </tr>  <tr>    <td class=\"tg-vaq8\">No overshoot</td>    <td class=\"tg-e1cu\">K<sub>u</sub>/5</td>    <td class=\"tg-e1cu\">T<sub>u</sub>/2</td>    <tdclass=\"tg-e1cu\">T<sub>u</sub>/3</td>  </tr></tbody></table>";
 }
 //HELPER FUNCTIONS
@@ -1476,5 +1399,5 @@ float invSqrt(float x) {
   float y = tmp * (1.69000231f - 0.714158168f * x * tmp * tmp);
   return y;
   */
-  return 1.0/sqrtf(x); //Teensy is fast enough to just take the compute penalty lol suck it arduino nano
+  return 1.0 / sqrtf(x);  //Teensy is fast enough to just take the compute penalty lol suck it arduino nano
 }
