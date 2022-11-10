@@ -1,7 +1,7 @@
-//Rawpter 1.5 by Sean J. Miller
+//Rawpter 1.6 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
 //Go to https://raisingawesome.site/projects for more info
-//MIT License - use at your own risk for any purpose you want
+//MIT License - use at your own risk
 
 #include <SPI.h>
 #include <WiFiNINA.h>          //WiFi
@@ -38,15 +38,15 @@ float stick_dampener = 0.1;                     //0.1-1 Lower=slower, higher=noi
 
 bool failsafed = false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
-float AccErrorX = -0.07;
-float AccErrorY = 0.00;
+float AccErrorX = -0.05;
+float AccErrorY = -0.00;
 float AccErrorZ = 0.00;
-float GyroErrorX = 0.39;
-float GyroErrorY = -0.09;
-float GyroErrorZ = -0.87;
+float GyroErrorX = 0.36;
+float GyroErrorY = -0.00;
+float GyroErrorZ = -0.59;
 
-float Gyro_filter = 0.95;
-float Accel_filter = 0.95;
+float Gyro_filter = .5;
+float Accel_filter = .5;
 
 float B_madgwick = 0.02;  //(default 0.04)
 float q0 = 1.0f;          //Initialize quaternion for madgwick filter
@@ -55,23 +55,23 @@ float q2 = 0.0f;
 float q3 = 0.0f;
 
 //Controller parameters (take note of defaults before modifying!):
-float i_limit = 12.5;   //Integrator saturation level, mostly for safety (default 25.0)
+float i_limit = 60;   //Integrator saturation level, mostly for safety (default 25.0)
 float maxRoll = 18.0;   //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxPitch = 18.0;  //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxYaw = 10.0;    //Max yaw rate in deg/sec (default 160.0)
 float maxMotor = 1.0;
 
-float Kp_roll_angle = 0.25;  //Roll P-gain - angle mode default .2
-float Ki_roll_angle = 0.05;  //Roll I-gain - angle mode default .3
-float Kd_roll_angle = 0.02;  //Roll D-gain - angle mode default 0.05
+float Kp_roll_angle = 25;  //Roll P-gain
+float Ki_roll_angle = 10;  //Roll I-gain
+float Kd_roll_angle = 2;  //Roll D-gain
 
-float Kp_pitch_angle = 0.15;  //Pitch P-gain - angle mode default .2
-float Ki_pitch_angle = 0.1;   //Pitch I-gain - angle mode default .3
-float Kd_pitch_angle = 0.02;  //Pitch D-gain - angle mode default .05
+float Kp_pitch_angle = 10;  //Pitch P-gain
+float Ki_pitch_angle = 8;   //Pitch I-gain
+float Kd_pitch_angle = 2;  //Pitch D-gain
 
-float Kp_yaw = 0;  //Yaw P-gain default .3
-float Ki_yaw = 0;  //Yaw I-gain default .05
-float Kd_yaw = 0;  //Yaw D-gain default .00015 (be careful when increasing too high, motors will begin to overheat!)
+float Kp_yaw = 0;  //Yaw P-gain default 30
+float Ki_yaw = 0;  //Yaw I-gain default 5
+float Kd_yaw = 0;  //Yaw D-gain default .015 (be careful when increasing too high, motors will begin to overheat!)
 
 //========================================================================================================================//
 //                                                     DECLARE PINS                                                       //
@@ -170,10 +170,8 @@ void setup() {
 }
 
 void loop() {
-  tick();  //stamp the start time of the loop to keep our timing to 2000Hz.  See tock() below.
+  tick();  //stamp the start time of the loop to keep our timing to 100Hz.  See tock() below.
   loopBuzzer();
-  //The main thread that infinitely loops - poling sensors and taking action.
-
   if (ALLOW_WIFI) loopWiFi();
   loopDrone();
   tock();
@@ -214,7 +212,6 @@ void setupDrone() {
   {
     delay(1000);
   }
-  //calibrateAttitude(); //This is only good if you are sure to start level.
 }
 
 void loopDrone() {
@@ -240,37 +237,34 @@ void setupBatteryMonitor()
 
 void loopBuzzer() 
 {  //this monitors the battery.  the lower it gets, the faster it beeps.
+  unsigned long myTime=millis();
   if (!beeping) {
-    if (millis() - buzzer_millis > (buzzer_spacing)) {
+    if (myTime - buzzer_millis > (buzzer_spacing)) {
       digitalWrite(BUZZER_PIN, HIGH);
       beeping = true;
-      buzzer_millis = millis();
+      buzzer_millis = myTime;
     }
   } else {
-    if (millis() - buzzer_millis > 80) {
+    if (myTime - buzzer_millis > 80) {
       beeping = false;
-      buzzer_millis = millis();
+      buzzer_millis = myTime;
       digitalWrite(BUZZER_PIN, LOW);
     }
   }
 
-  if (millis() > next_voltage_check) {
-    next_voltage_check = millis() + 10000;  //checkvoltage once every 10 seconds versus every loop.
+  if (myTime > next_voltage_check) {
+    next_voltage_check = myTime + 10000;  //checkvoltage once every 10 seconds versus every loop.
     batteryVoltage = analogRead(A6);
     if (BATTERYTYPE == 14.8) {
-      if (batteryVoltage > 604) buzzer_spacing = 40000;
-      else if (batteryVoltage > 580) buzzer_spacing = 30000;
-      else if (batteryVoltage > 556) buzzer_spacing = 20000;
-      else if (batteryVoltage > 534) buzzer_spacing = 10000;
-      else if (batteryVoltage > 510) buzzer_spacing = 500;
+      //based on 330K and 51K voltage divider that takes 16.8V to 2.25V
+      if (batteryVoltage > 600) buzzer_spacing = 40000;
+      else if (batteryVoltage > 580 ) buzzer_spacing = 30000;
+      else if (batteryVoltage > 560) buzzer_spacing = 20000;
+      else if (batteryVoltage > 540) buzzer_spacing = 10000;
+      else if (batteryVoltage > 530) buzzer_spacing = 500;
       else buzzer_spacing = 100;
     } else {
-      if (batteryVoltage > 302) buzzer_spacing = 40000;
-      else if (batteryVoltage > 290) buzzer_spacing = 30000;
-      else if (batteryVoltage > 278) buzzer_spacing = 20000;
-      else if (batteryVoltage > 267) buzzer_spacing = 10000;
-      else if (batteryVoltage > 255) buzzer_spacing = 500;
-      else buzzer_spacing = 100;
+      //Depends on your resistors and battery choice
     }
   }
 }
@@ -352,7 +346,7 @@ void loopWiFi() {
           MakeWebPage(client, "<meta http-equiv = \"refresh\" content = \"0; url = http://192.168.2.4 \"/>");
         } else if (currentLine.endsWith("GET / HTTP")) {  //Handle hitting the basic page (1st connection)
           String myMsg = "<h1>Rawpter V1.5</h1><small>by Raising Awesome</small><br>";
-          myMsg += "Snapshot:<br>Desired Roll=" + String(roll_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Roll=" + String(roll_IMU) + "&#176;<br>Desired Pitch= " + String(pitch_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Pitch=" + String(pitch_IMU) + "&#176;&nbsp;&nbsp;&nbsp;Loop Time=: " + String(1 / (deltaTime / 1000000)) + "&nbsp;&nbsp;&nbsp;Throttle PWM=" + String(PWM_throttle) + "<br>";
+          myMsg += "<b>Snapshot:</b><br>Desired Roll=" + String(roll_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Roll=" + String(roll_IMU) + "&#176;<br>Desired Pitch= " + String(pitch_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Pitch=" + String(pitch_IMU) + "&#176;<br>>Loop Time=: " + String(int(round(1 / (deltaTime)))) + "&nbsp;&nbsp;&nbsp;Throttle PWM=" + String(PWM_throttle) + "<br>Battery=" + String((batteryVoltage  *  0.003222656),1) + ", " + String(batteryVoltage) + "<br>";
           myMsg += GetParameters() + "<br><input class='mt-2 btn btn-primary' type=submit value='submit' />";
           MakeWebPage(client, myMsg);
         }
@@ -362,6 +356,7 @@ void loopWiFi() {
     client.stop();
   }
 }
+
 void setTheValuesFromUserForm(WiFiClient client) {
   String currentLine = "";
   UPONLYMODE = false;
@@ -619,10 +614,10 @@ void controlMixer() {
    */
 
   //Quad mixing. maxMotor is used to keep the motors from being too violent if you have a big battery and concers about that.
-  m1_command_scaled = maxMotor * (thro_des)-pitch_PID + roll_PID + yaw_PID;    //Front left
-  m2_command_scaled = maxMotor * (thro_des)-pitch_PID - roll_PID - yaw_PID;    //Front right
-  m3_command_scaled = maxMotor * (thro_des) + pitch_PID - roll_PID + yaw_PID;  //Back Right
-  m4_command_scaled = maxMotor * (thro_des) + pitch_PID + roll_PID - yaw_PID;  //Back Left
+  m1_command_scaled = maxMotor * (thro_des) - pitch_PID + roll_PID + yaw_PID;    //Front left
+  m2_command_scaled = maxMotor * (thro_des) - pitch_PID - roll_PID - yaw_PID;    //Front right
+  m3_command_scaled = maxMotor * (thro_des) + pitch_PID - roll_PID + yaw_PID;    //Back Right
+  m4_command_scaled = maxMotor * (thro_des) + pitch_PID + roll_PID - yaw_PID;    //Back Left
 
   m1_command_scaled = constrain(m1_command_scaled, 0, maxMotor);
   m2_command_scaled = constrain(m2_command_scaled, 0, maxMotor);
@@ -687,15 +682,15 @@ void calculate_IMU_error() {
   /*
    * The error values it computes are applied to the raw gyro and 
    * accelerometer values AccX, AccY, AccZ, GyroX, GyroY, GyroZ in getIMUdata().
-   * this will correct for drift in the sensor.
+   * this will correct for sensor drift and crookedness in your copter.
    */
   float AcX, AcY, AcZ, GyX, GyY, GyZ;
 
-  Serial.println("Calculating IMU Error with 1000 iterations. Please stand by...");
+  Serial.println("Calculating IMU Error with 10000 iterations. Please stand by...");
 
-  //Read IMU values 1000 times.  Should take around 10 seconds at 104Hz IMU timing.
-  int c = 0;AccErrorX=0;AccErrorY=0;AccErrorZ=0;GyroErrorX=0;GyroErrorY=0;GyroErroZ=0;
-  while (c < 1000) {
+  //Read IMU values 1000 times.  Should take around 2 minutes at 104Hz IMU timing.
+  int c = 0;AccErrorX=0;AccErrorY=0;AccErrorZ=0;GyroErrorX=0;GyroErrorY=0;GyroErrorZ=0;
+  while (c < 10000) {
     while (!IMU.accelerationAvailable()&!IMU.gyroscopeAvailable()) delay(1);
     IMU.readAcceleration(AcX, AcY, AcZ);
     IMU.readGyroscope(GyX, GyY, GyZ);
@@ -714,7 +709,7 @@ void calculate_IMU_error() {
     GyroErrorY = GyroErrorY + GyroY;
     GyroErrorZ = GyroErrorZ + GyroZ;
     c++;
-    Serial.println(c);
+    Serial.println(String(10000-c));
   }
   //Divide the sum by 12000 to get the error value
   AccErrorX = AccErrorX / c;
@@ -748,21 +743,6 @@ void calculate_IMU_error() {
   while (true) delay(1000);
 }
 
-void calibrateAttitude() {
-  //DESCRIPTION: Used to warm up the main loop to allow the madwick filter to converge before commands can be sent to the actuators
-  //Assuming vehicle is powered up on level surface!
-  /*
-   * This function is used on startup to warm up the attitude estimation and is what causes startup to take a few seconds
-   * to boot. 
-   */
-  //Warm up IMU and madgwick filter in simulated main loop
-  for (int i = 0; i <= 10000; i++) {
-    tick();
-    getIMUdata();
-    Madgwick6DOF(GyroX, -GyroY, -GyroZ, -AccX, AccY, AccZ);
-    tock();
-  }
-}
 void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az) {
   //DESCRIPTION: Attitude estimation through sensor fusion - 6DOF
   /*
@@ -884,13 +864,13 @@ void PIDControlCalcs() {
 
   error_roll = roll_des - roll_IMU;
   integral_roll = integral_roll_prev + error_roll * deltaTime;
-  if (PWM_throttle < 1100) {  //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {  //Don't let integrator build if throttle is too low
     integral_roll = 0;
   }
 
   integral_roll = constrain(integral_roll, -i_limit, i_limit);                                                       //Saturate integrator to prevent unsafe buildup
   derivative_roll = GyroX;                                                                                           //(roll_des-roll_IMU-roll_des-previous_IMU)/dt=current angular velocity since last IMU read and therefore GyroX in deg/s
-  roll_PID = 0.01 * (Kp_roll_angle * error_roll + Ki_roll_angle * integral_roll - Kd_roll_angle * derivative_roll);  //Scaled by .01 to bring within -1 to 1 range
+  roll_PID = 0.0001 * (Kp_roll_angle * error_roll + Ki_roll_angle * integral_roll - Kd_roll_angle * derivative_roll);  //Scaled by .0001 to bring within -1 to 1 range
 
   //Pitch
   if (UPONLYMODE) pitch_des = 0;
@@ -898,26 +878,34 @@ void PIDControlCalcs() {
 
   integral_pitch = integral_pitch_prev + error_pitch * deltaTime;
 
-  if (PWM_throttle < 1100) {  //Don't let integrator build if throttle is probably not sufficient to lift off ground
+  if (PWM_throttle < 1060) {  //Don't let integrator build if throttle is probably not sufficient to lift off ground
     integral_pitch = 0;
   }
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit);  //Limit integrator to prevent unsafe buildup
 
   derivative_pitch = GyroY;
 
-  pitch_PID = .01 * (Kp_pitch_angle * error_pitch + Ki_pitch_angle * integral_pitch - Kd_pitch_angle * derivative_pitch);  //Scaled by .01 to bring within -1 to 1 range
+  pitch_PID = .0001 * (Kp_pitch_angle * error_pitch + Ki_pitch_angle * integral_pitch - Kd_pitch_angle * derivative_pitch);  //Scaled by .0001 to bring within -1 to 1 range
 
   //Yaw, stablize on rate from GyroZ versus angle.  In other words, your stick is setting y axis rotation speed - not the angle to get to.
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw * deltaTime;
-  if (PWM_throttle < 1100) {  //Don't let integrator build if throttle is too low
+  if (PWM_throttle < 1060) {  //Don't let integrator build if throttle is too low
     integral_yaw = 0;
   }
   integral_yaw = constrain(integral_yaw, -i_limit, i_limit);  //Saturate integrator to prevent unsafe buildup
   derivative_yaw = (error_yaw - error_yaw_prev) / deltaTime;
-  yaw_PID = .01 * (Kp_yaw * error_yaw + Ki_yaw * integral_yaw + Kd_yaw * derivative_yaw);  //Scaled by .01 to bring within -1 to 1 range
+  yaw_PID = .0001 * (Kp_yaw * error_yaw + Ki_yaw * integral_yaw + Kd_yaw * derivative_yaw);  //Scaled by .0001 to bring within -1 to 1 range
 
   if (UPONLYMODE) yaw_PID = 0;
+
+  if (PWM_throttle < 1000)
+  { //This will keep the motors from spinning with the throttle at zero should the drone be sitting unlevel.
+    roll_PID=0;
+    pitch_PID=0;
+    yaw_PID=0;
+  }
+
   //Update roll variables
   integral_roll_prev = integral_roll;
   //Update pitch variables
