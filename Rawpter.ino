@@ -1,4 +1,4 @@
-//Rawpter 1.6 by Sean J. Miller
+//Rawpter 1.7 by Sean J. Miller
 //Flight Controller code for an Arduino Nano RP2040 Connect
 //Go to https://raisingawesome.site/projects for more info
 //MIT License - use at your own risk
@@ -21,7 +21,7 @@
 //The battery alarm code handles 14.8 or 7.4V LIPOs.  Set to your type of battery. If not hooked up, it will pull down and beep often.
 #define BATTERYTYPE 14.8
 #define BUZZER_PIN 9
-int batteryVoltage = 1023;             //just a default for the battery monitoring routine
+int batteryVoltage = 777;             //just a default for the battery monitoring routine
 unsigned long next_voltage_check = 0;  //used in loopBuzzer to check for voltage on the main battery.
 bool beeping = false;         //For tracking beeping when the battery is getting low.
 
@@ -38,15 +38,15 @@ float stick_dampener = 0.1;                     //0.1-1 Lower=slower, higher=noi
 
 bool failsafed = false;
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
-float AccErrorX = -0.05;
-float AccErrorY = -0.00;
-float AccErrorZ = 0.00;
-float GyroErrorX = 0.36;
-float GyroErrorY = -0.00;
-float GyroErrorZ = -0.59;
+float AccErrorX = -0.03;
+float AccErrorY = 0.00;
+float AccErrorZ = 0.01;
+float GyroErrorX = 0.37;
+float GyroErrorY = -0.04;
+float GyroErrorZ = -0.45;
 
-float Gyro_filter = .5;
-float Accel_filter = .5;
+float Gyro_filter = .97;
+float Accel_filter = .97;
 
 float B_madgwick = 0.02;  //(default 0.04)
 float q0 = 1.0f;          //Initialize quaternion for madgwick filter
@@ -54,18 +54,18 @@ float q1 = 0.0f;
 float q2 = 0.0f;
 float q3 = 0.0f;
 
-//Controller parameters (take note of defaults before modifying!):
+//Controller parameters (this is where you "tune it".  It's best to use the WiFi interface to do it live and then update once its tuned.):
 float i_limit = 60;   //Integrator saturation level, mostly for safety (default 25.0)
 float maxRoll = 18.0;   //Max roll angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxPitch = 18.0;  //Max pitch angle in degrees for angle mode (maximum ~70 degrees), deg/sec for rate mode (default 30.0)
 float maxYaw = 10.0;    //Max yaw rate in deg/sec (default 160.0)
-float maxMotor = 1.0;
+float maxMotor = 0.8;
 
-float Kp_roll_angle = 25;  //Roll P-gain
-float Ki_roll_angle = 10;  //Roll I-gain
+float Kp_roll_angle = 10;  //Roll P-gain
+float Ki_roll_angle = 8;  //Roll I-gain
 float Kd_roll_angle = 2;  //Roll D-gain
 
-float Kp_pitch_angle = 10;  //Pitch P-gain
+float Kp_pitch_angle = 15;  //Pitch P-gain
 float Ki_pitch_angle = 8;   //Pitch I-gain
 float Kd_pitch_angle = 2;  //Pitch D-gain
 
@@ -143,8 +143,7 @@ float error_yaw, error_yaw_prev, integral_yaw, integral_yaw_prev, derivative_yaw
 
 //Mixer
 float m1_command_scaled, m2_command_scaled, m3_command_scaled, m4_command_scaled;
-float m1_previous, m2_previous, m3_previous, m4_previous;
-float rate = 1.0;  //This sets how quickly the motors will respond to a change of their speed.  1 means instant, 0.1 is slow.  Effectively dampens the gain. Probably can just leave it as 1.0.
+
 int m1_command_PWM, m2_command_PWM, m3_command_PWM, m4_command_PWM;
 unsigned long buzzer_millis;
 unsigned long buzzer_spacing = 10000;
@@ -163,16 +162,22 @@ WiFiServer server(80);
 
 void setup() {
   //Bootup operations
+  
+  analogReadResolution(12); //The RP2040 has a 12 bit ADC versus the standard 10 from the Uno
   setupSerial();
   if (ALLOW_WIFI) setupWiFi();  //At first power on, a WiFi hotspot is set up for talking to the drone. (SSID Rawpter, 12345678)
-  setupBatteryMonitor();
   setupDrone();
+  setupBatteryMonitor();
 }
 
 void loop() {
   tick();  //stamp the start time of the loop to keep our timing to 100Hz.  See tock() below.
-  loopBuzzer();
-  if (ALLOW_WIFI) loopWiFi();
+  if (throttle_is_cut) 
+  {
+    //We are only going to allow these to slow down the loop if the throttle is cut.  Otherwise, the loop speed is too irregular.
+    loopBuzzer();
+    if (ALLOW_WIFI) loopWiFi();
+  }
   loopDrone();
   tock();
 }
@@ -199,7 +204,7 @@ void setupDrone() {
   IMUinit();
 
   //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
-  //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
+ // calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
 
   if (getRadioPWM(1) > 1800 && getRadioPWM(1) < 2400 & !EASYCHAIR) calibrateESCs();  //if the throttle is up, first calibrate ESCs before going into the loop
 
@@ -208,7 +213,8 @@ void setupDrone() {
   m3_command_PWM = 0;
   m4_command_PWM = 0;
 
-  while (getRadioPWM(1) > 1060 && getRadioPWM(1) < 2400 & !EASYCHAIR && getRadioPWM(5) < 1300)  //wait until the throttle is turned down and throttlecut switch is not engaged before allowing anything else to happen.
+
+  while (getRadioPWM(1) > 1060 && getRadioPWM(1) < 2400 && !EASYCHAIR && getRadioPWM(5) < 1300)  //wait until the throttle is turned down and throttlecut switch is not engaged before allowing anything else to happen.
   {
     delay(1000);
   }
@@ -222,7 +228,9 @@ void loopDrone() {
   controlMixer();                                          //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
   scaleCommands();                                         //Scales motor commands to 0-1
   throttleCut();                                           //Directly sets motor commands to off based on channel 5 being switched
-  Troubleshooting();                                       //will do the print routines that are uncommented
+    #if EASYCHAIR
+    Troubleshooting();                                       //will do the print routines that are uncommented
+    #endif
   commandMotors();                                         //Sends command pulses to each ESC pin to drive the motors
   getRadioSticks();                                        //Gets the PWM from the radio receiver
   failSafe();                                              //Prevent failures in event of bad receiver connection, defaults to failsafe values assigned in setup
@@ -253,15 +261,15 @@ void loopBuzzer()
   }
 
   if (myTime > next_voltage_check) {
-    next_voltage_check = myTime + 10000;  //checkvoltage once every 10 seconds versus every loop.
+    next_voltage_check = myTime + 10000;  //checkvoltage once every 10 seconds versus every loop.    
     batteryVoltage = analogRead(A6);
     if (BATTERYTYPE == 14.8) {
       //based on 330K and 51K voltage divider that takes 16.8V to 2.25V
-      if (batteryVoltage > 600) buzzer_spacing = 40000;
-      else if (batteryVoltage > 580 ) buzzer_spacing = 30000;
-      else if (batteryVoltage > 560) buzzer_spacing = 20000;
-      else if (batteryVoltage > 540) buzzer_spacing = 10000;
-      else if (batteryVoltage > 530) buzzer_spacing = 500;
+      if (batteryVoltage > 1457) buzzer_spacing = 40000;
+      else if (batteryVoltage > 1440 ) buzzer_spacing = 30000;
+      else if (batteryVoltage > 1400) buzzer_spacing = 20000;
+      else if (batteryVoltage > 1350) buzzer_spacing = 10000;
+      else if (batteryVoltage > 1301) buzzer_spacing = 500;
       else buzzer_spacing = 100;
     } else {
       //Depends on your resistors and battery choice
@@ -279,7 +287,9 @@ void Troubleshooting() {
   //printPIDoutput();     //Prints computed stabilized PID variables from controller and desired setpoint (expected: ~ -1 to 1)
   //printMotorCommands(); //Prints the values being written to the motors (expected: 1000 to 2000)
   //printtock();      //Prints the time between loops in microseconds (expected: microseconds between loop iterations and less the Gyro/Acc update speed.  Set by LOOP_TIMING)
-  if (EASYCHAIR) printJSON();
+  #if EASYCHAIR
+    printJSON();
+  #endif
 }
 
 void setupSerial() {
@@ -345,8 +355,11 @@ void loopWiFi() {
           //Handle clicking the Begin button
           MakeWebPage(client, "<meta http-equiv = \"refresh\" content = \"0; url = http://192.168.2.4 \"/>");
         } else if (currentLine.endsWith("GET / HTTP")) {  //Handle hitting the basic page (1st connection)
-          String myMsg = "<h1>Rawpter V1.5</h1><small>by Raising Awesome</small><br>";
-          myMsg += "<b>Snapshot:</b><br>Desired Roll=" + String(roll_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Roll=" + String(roll_IMU) + "&#176;<br>Desired Pitch= " + String(pitch_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Pitch=" + String(pitch_IMU) + "&#176;<br>>Loop Time=: " + String(int(round(1 / (deltaTime)))) + "&nbsp;&nbsp;&nbsp;Throttle PWM=" + String(PWM_throttle) + "<br>Battery=" + String((batteryVoltage  *  0.003222656),1) + ", " + String(batteryVoltage) + "<br>";
+          String myMsg = "<h1>Rawpter V1.7</h1><small>by Raising Awesome</small><br>";
+          //For the battery voltage calc, you can use ohm's law on your chosen voltage divider resistors and get the voltage ratio of the 12bit ADC.  I simply recorded values against fed voltages from my bench power supply and fit 
+          //a line.  Good ole' y=mx+b.
+          myMsg += "<b>Snapshot:</b><br>Desired Roll=" + String(roll_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Roll=" + String(roll_IMU) + "&#176;<br>Desired Pitch= " + String(pitch_des) + "&#176;&nbsp;&nbsp;&nbsp;IMU Pitch=" + String(pitch_IMU) + "&#176;<br>Loop Time= " + String(int(round(1 / (deltaTime)))) + "&nbsp;&nbsp;&nbsp;Throttle PWM=" + String(PWM_throttle) + "<br>Battery=" + String( (4.4695/104.0+((float)batteryVoltage/104.0)),1) + "V (" + String(batteryVoltage) + ")<br>";
+          if (batteryVoltage<1350) myMsg+="<br><div class='alert alert-danger'>DANGER: BATTERY LOW!</div><br>";
           myMsg += GetParameters() + "<br><input class='mt-2 btn btn-primary' type=submit value='submit' />";
           MakeWebPage(client, myMsg);
         }
@@ -383,16 +396,6 @@ void setTheValuesFromUserForm(WiFiClient client) {
           currentLine += c;
         }
         maxMotor = myValue.toFloat();
-      }
-      if (currentLine.endsWith("rate=")) {
-        String myValue = "";
-
-        while (!currentLine.endsWith("&")) {
-          c = client.read();
-          if (c != '&') myValue += c;
-          currentLine += c;
-        }
-        rate = myValue.toFloat();
       }
       if (currentLine.endsWith("stick_dampener=")) {
         String myValue = "";
@@ -550,7 +553,6 @@ void setTheValuesFromUserForm(WiFiClient client) {
 String GetParameters() {
   String myString;
   myString = myString + "<table><tr><td>Max Motor Speed (0.0-1.0):</td><td><input type=number step=.001 name=maxMotor style='width:70px;' value='" + String(maxMotor) + "'></td></tr>";
-  myString = myString + "<tr><td>Motor Change Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=rate style='width:70px;' value='" + String(rate) + "'></td></tr>";
   myString = myString + "<tr><td>Stick Dampening (0.01-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=stick_dampener style='width:70px;' value='" + String(stick_dampener) + "'></td></tr>";
   myString = myString + "<tr><td>Integral Accumulation (25 default):</td><td><input type=number step=.001 name=i_limit style='width:70px;' value='" + String(i_limit) + "'></td></tr>";
   myString = myString + "<tr><td>Accel Dampening (0.1-1.0):<br>0.1=slow/steady, 1.0=noisy/fast</td><td><input type=number step=.001 name=Accel_filter style='width:70px;' value='" + String(Accel_filter) + "'></td></tr>";
@@ -619,20 +621,10 @@ void controlMixer() {
   m3_command_scaled = maxMotor * (thro_des) + pitch_PID - roll_PID + yaw_PID;    //Back Right
   m4_command_scaled = maxMotor * (thro_des) + pitch_PID + roll_PID - yaw_PID;    //Back Left
 
-  m1_command_scaled = constrain(m1_command_scaled, 0, maxMotor);
-  m2_command_scaled = constrain(m2_command_scaled, 0, maxMotor);
-  m3_command_scaled = constrain(m3_command_scaled, 0, maxMotor);
-  m4_command_scaled = constrain(m4_command_scaled, 0, maxMotor);
-
-  m1_command_scaled = (1 - rate) * m1_previous + rate * m1_command_scaled;
-  m2_command_scaled = (1 - rate) * m2_previous + rate * m2_command_scaled;
-  m3_command_scaled = (1 - rate) * m3_previous + rate * m3_command_scaled;
-  m4_command_scaled = (1 - rate) * m4_previous + rate * m4_command_scaled;
-
-  m1_previous = m1_command_scaled;
-  m2_previous = m2_command_scaled;
-  m3_previous = m3_command_scaled;
-  m4_previous = m4_command_scaled;
+  m1_command_scaled = constrain(m1_command_scaled, 0, 1.0);
+  m2_command_scaled = constrain(m2_command_scaled, 0, 1.0);
+  m3_command_scaled = constrain(m3_command_scaled, 0, 1.0);
+  m4_command_scaled = constrain(m4_command_scaled, 0, 1.0);
 }
 
 void IMUinit() {
@@ -654,12 +646,15 @@ void getIMUdata() {
     AccY = AccY - AccErrorY;
     AccY = AccY - AccErrorZ;
     //Correct the outputs with the calculated error values
+    /*
+    //This was used to suppress noise.  However, it just slows things down.  There is already internal filters to the IMU.
     AccX = (1.0 - Accel_filter) * AccX_prev + Accel_filter * AccX;
     AccY = (1.0 - Accel_filter) * AccY_prev + Accel_filter * AccY;
     AccZ = (1.0 - Accel_filter) * AccZ_prev + Accel_filter * AccZ;
     AccX_prev = AccX;
     AccY_prev = AccY;
     AccZ_prev = AccZ;
+    */
   } else return;
   if (IMU.gyroscopeAvailable()) {
     //Gyro
@@ -668,12 +663,15 @@ void getIMUdata() {
     GyroX = GyroX - GyroErrorX;
     GyroY = GyroY - GyroErrorY;
     GyroZ = GyroZ - GyroErrorZ;
+    /*
+    //This was used to suppress noise.  However, it just slows things down.  There is already internal filters to the IMU.
     GyroX = (1.0 - Gyro_filter) * GyroX_prev + Gyro_filter * GyroX;
     GyroY = (1.0 - Gyro_filter) * GyroY_prev + Gyro_filter * GyroY;
     GyroZ = (1.0 - Gyro_filter) * GyroZ_prev + Gyro_filter * GyroZ;
     GyroX_prev = GyroX;
     GyroY_prev = GyroY;
     GyroZ_prev = GyroZ;
+    */
   }
 }
 
@@ -807,7 +805,6 @@ void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float az) {
   }
 
   //Integrate rate of change of quaternion to yield quaternion
-
   q0 += qDot1 * deltaTime;
   q1 += qDot2 * deltaTime;
   q2 += qDot3 * deltaTime;
@@ -832,7 +829,7 @@ void getDesiredAnglesAndThrottle() {
    * Updates the desired state variables thro_des, roll_des, pitch_des, and yaw_des. These are computed by using the raw
    * RC pwm commands and scaling them to be within our limits defined in setup. thro_des stays within 0 to 1 range.
    * roll_des and pitch_des are scaled to be within max roll/pitch amount in degrees
-   * (rate mode). yaw_des is scaled to be within max yaw in degrees/sec.
+   * yaw_des is scaled to be within max yaw in degrees/sec.
    */
   thro_des = (PWM_throttle - 1000.0) / 1000.0;   //Between 0 and 1
   roll_des = (PWM_roll - 1500.0) / 500.0;        //Between -1 and 1
@@ -859,58 +856,50 @@ void PIDControlCalcs() {
    * can be thought of as 1-D stablized signals. They are mixed to the configuration of the vehicle in controlMixer().
    */
 
-  //Roll
-  if (UPONLYMODE) roll_des = 0;
 
-  error_roll = roll_des - roll_IMU;
-  integral_roll = integral_roll_prev + error_roll * deltaTime;
-  if (PWM_throttle < 1060) {  //Don't let integrator build if throttle is too low
-    integral_roll = 0;
+  if (PWM_throttle < 1030)
+  { //This will keep the motors from spinning with the throttle at zero should the drone be sitting unlevel.
+    integral_roll_prev = 0;
+    integral_pitch_prev = 0;
+    error_yaw_prev = 0;
+    integral_yaw_prev = 0;
+    roll_PID=0;
+    pitch_PID=0;
+    yaw_PID=0;
+    return;
+  }
+  if (UPONLYMODE)
+  {
+    //For troubleshooting.  UPONLYMODE can be set with the web interface.
+    roll_des = 0;
+    pitch_des = 0;
+    yaw_PID = 0;
   }
 
-  integral_roll = constrain(integral_roll, -i_limit, i_limit);                                                       //Saturate integrator to prevent unsafe buildup
-  derivative_roll = GyroX;                                                                                           //(roll_des-roll_IMU-roll_des-previous_IMU)/dt=current angular velocity since last IMU read and therefore GyroX in deg/s
+  //Roll
+  error_roll = roll_des - roll_IMU;
+  integral_roll = integral_roll_prev + error_roll * deltaTime;
+  integral_roll = constrain(integral_roll, -i_limit, i_limit); //Limit integrator to prevent saturating
+  derivative_roll = GyroX; //(roll_des-roll_IMU-roll_des-previous_IMU)/dt=current angular velocity since last IMU read and therefore GyroX in deg/s
   roll_PID = 0.0001 * (Kp_roll_angle * error_roll + Ki_roll_angle * integral_roll - Kd_roll_angle * derivative_roll);  //Scaled by .0001 to bring within -1 to 1 range
 
   //Pitch
-  if (UPONLYMODE) pitch_des = 0;
   error_pitch = pitch_des - pitch_IMU;
-
   integral_pitch = integral_pitch_prev + error_pitch * deltaTime;
-
-  if (PWM_throttle < 1060) {  //Don't let integrator build if throttle is probably not sufficient to lift off ground
-    integral_pitch = 0;
-  }
-  integral_pitch = constrain(integral_pitch, -i_limit, i_limit);  //Limit integrator to prevent unsafe buildup
-
+  integral_pitch = constrain(integral_pitch, -i_limit, i_limit);
   derivative_pitch = GyroY;
-
   pitch_PID = .0001 * (Kp_pitch_angle * error_pitch + Ki_pitch_angle * integral_pitch - Kd_pitch_angle * derivative_pitch);  //Scaled by .0001 to bring within -1 to 1 range
 
   //Yaw, stablize on rate from GyroZ versus angle.  In other words, your stick is setting y axis rotation speed - not the angle to get to.
   error_yaw = yaw_des - GyroZ;
   integral_yaw = integral_yaw_prev + error_yaw * deltaTime;
-  if (PWM_throttle < 1060) {  //Don't let integrator build if throttle is too low
-    integral_yaw = 0;
-  }
-  integral_yaw = constrain(integral_yaw, -i_limit, i_limit);  //Saturate integrator to prevent unsafe buildup
+  integral_yaw = constrain(integral_yaw, -i_limit, i_limit);
   derivative_yaw = (error_yaw - error_yaw_prev) / deltaTime;
   yaw_PID = .0001 * (Kp_yaw * error_yaw + Ki_yaw * integral_yaw + Kd_yaw * derivative_yaw);  //Scaled by .0001 to bring within -1 to 1 range
-
-  if (UPONLYMODE) yaw_PID = 0;
-
-  if (PWM_throttle < 1000)
-  { //This will keep the motors from spinning with the throttle at zero should the drone be sitting unlevel.
-    roll_PID=0;
-    pitch_PID=0;
-    yaw_PID=0;
-  }
-
+  
   //Update roll variables
   integral_roll_prev = integral_roll;
-  //Update pitch variables
   integral_pitch_prev = integral_pitch;
-  //Update yaw variables
   error_yaw_prev = error_yaw;
   integral_yaw_prev = integral_yaw;
 }
@@ -920,16 +909,11 @@ void scaleCommands() {
   /*
    * The actual pulse width is set at the servo attach.
    */
-  //Constrain commands to motors within PWM 0-180 degrees for Servo PWM.
+  //Scale to Servo PWM 0-180 degrees for stop to full speed.  No need to constrain since mx_command_scaled already is.
   m1_command_PWM = m1_command_scaled * 180;
   m2_command_PWM = m2_command_scaled * 180;
   m3_command_PWM = m3_command_scaled * 180;
-  m4_command_PWM = m4_command_scaled * 180;
-
-  m1_command_PWM = constrain(m1_command_PWM, 0, 180);
-  m2_command_PWM = constrain(m2_command_PWM, 0, 180);
-  m3_command_PWM = constrain(m3_command_PWM, 0, 180);
-  m4_command_PWM = constrain(m4_command_PWM, 0, 180);
+  m4_command_PWM = m4_command_scaled * 180;  
 }
 
 void getRadioSticks() {
@@ -947,9 +931,12 @@ void getRadioSticks() {
   PWM_ThrottleCutSwitch = getRadioPWM(5);
 
   //Low-pass the critical commands and update previous values
-  if (PWM_throttle_prev - PWM_throttle > 0) {
-    PWM_throttle = (1.0 - stick_dampener) * PWM_throttle_prev + stick_dampener * PWM_throttle;
-  } else {  //go down slower than up
+  if (PWM_throttle - PWM_throttle_prev < 0)
+  {
+    //Going down  - slow
+    PWM_throttle = (.95) * PWM_throttle_prev + 0.05 * PWM_throttle;
+  } else 
+  { //Going up - fast
     PWM_throttle = (stick_dampener)*PWM_throttle_prev + (1 - stick_dampener) * PWM_throttle;
   }
   PWM_roll = (1.0 - stick_dampener) * PWM_roll_prev + stick_dampener * PWM_roll;
@@ -992,8 +979,10 @@ void failSafe() {
     failsafed = true;
     setToFailsafe();
   } else failsafed = false;
-
-  if (EASYCHAIR) PWM_throttle = 1500;  //For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
+  
+  #if EASYCHAIR
+    PWM_throttle = 1500;  //For testing in the easy chair with the Arduino out of the drone.  See the compiler directive at the top of the code.
+  #endif
 }
 
 void commandMotors() {
@@ -1030,21 +1019,22 @@ void throttleCut() {
    * called before commandMotors() is called so that the last thing checked is if the user is giving permission to command
    * the motors to anything other than minimum value. Safety first. 
    */
-  if (EASYCHAIR) {
+  #if EASYCHAIR 
     //This is set above in compiler directives for when you are testing the Arduino outside of the drone.
     throttle_is_cut = false;
     return;
-  }
+  #endif
+
   if (throttle_is_cut) killMotors();  //make sure we keep those motors at 0 if the throttle was cut.
 
   if (PWM_ThrottleCutSwitch < 1300) {
     //throttleCutCounter will ensure it is not just a blip that has caused a false cut.
-    if (++throttleCutCounter > 20) killMotors();
+    if (++throttleCutCounter > 10) killMotors();
     return;
   }
   if (throttle_is_cut && PWM_ThrottleCutSwitch > 1500) {
     //reset only if throttle is down to prevent a jolting suprise
-    if (PWM_throttle < 1040 && ++throttleNotCutCounter > 20) {
+    if (PWM_throttle < 1040 && ++throttleNotCutCounter > 10) {
       throttle_is_cut = false;
       throttleNotCutCounter = 0;
       throttleCutCounter = 0;
@@ -1053,8 +1043,8 @@ void throttleCut() {
   }
 
   //Handle when things are going upside down
-  if (roll_IMU > 45 || roll_IMU < -45 || pitch_IMU > 45 || pitch_IMU < -45) {
-    if (++throttleCutCounter > 8) killMotors();
+  if (roll_IMU > 55 || roll_IMU < -55 || pitch_IMU > 55 || pitch_IMU < -55) {
+    if (++throttleCutCounter > 4) killMotors();
     return;
   }
   throttleNotCutCounter = 0;
@@ -1064,6 +1054,7 @@ void throttleCut() {
 void killMotors() {
   //sets the PWM to its lowest value to shut off a motor such as whne the throttle cut switch is fliped.
   throttle_is_cut = true;
+  throttleCutCounter=10; //to prevent overflowing float
   m1_command_PWM = 0;
   m2_command_PWM = 0;
   m3_command_PWM = 0;
@@ -1080,7 +1071,7 @@ void tock() {
    */
   //Sit in loop until appropriate time has passed while checking for any WiFi client activity.
   while (invFreq > (micros() - current_time)) {
-    if (ALLOW_WIFI) loopWiFi();
+    if (ALLOW_WIFI&&throttle_is_cut) loopWiFi();
   };
 }
 
